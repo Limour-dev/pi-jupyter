@@ -81,7 +81,10 @@ describe("RemoteSession", () => {
     const s = new RemoteSession(server, CONFIG);
     await s.initialize();
     expect(server.ping).toHaveBeenCalledTimes(1);
-    expect(server.startKernel).toHaveBeenCalledWith("python3");
+    expect(server.startKernel).toHaveBeenCalledWith(
+      "python3",
+      expect.objectContaining({ sessionPath: expect.any(String) }),
+    );
     expect(kernel.waitConnected).toHaveBeenCalledTimes(1);
     // bootstrap + missing-package probe = at least 2 silent executes
     expect(kernel.execute.mock.calls.length).toBeGreaterThanOrEqual(2);
@@ -335,6 +338,9 @@ describe("RemoteSession — bug fixes", () => {
     server.listKernelSpecs.mockRejectedValue(new Error("403"));
     const s = new RemoteSession(server, CONFIG);
     await expect(s.initialize()).resolves.toBeUndefined();
-    expect(server.startKernel).toHaveBeenCalledWith("python3");
+    expect(server.startKernel).toHaveBeenCalledWith(
+      "python3",
+      expect.objectContaining({ sessionPath: expect.any(String) }),
+    );
   });
 });

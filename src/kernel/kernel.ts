@@ -11,7 +11,7 @@
  * "abort") come from the shell-channel execute_reply, NOT from iopub.  Some
  * failures (e.g. KeyboardInterrupt) only surface in the reply.
  */
-import { type Kernel, KernelMessage } from "@jupyterlab/services";
+import { type Kernel, KernelMessage, type Session } from "@jupyterlab/services";
 import { dedupeImages } from "../domain/output";
 import { type JsOutput, TimeoutError } from "../domain/types";
 import { fromIOPub } from "./convert";
@@ -23,7 +23,10 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
 const TIMEOUT_SETTLE_MS = 5_000;
 
 export class JupyterKernel implements KernelPort {
-  constructor(private kernel: Kernel.IKernelConnection) {}
+  constructor(
+    private kernel: Kernel.IKernelConnection,
+    private session?: Session.ISessionConnection,
+  ) {}
 
   async execute(code: string, opts: ExecuteOptions = {}): Promise<ExecuteOutcome> {
     const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -97,15 +100,17 @@ export class JupyterKernel implements KernelPort {
   }
 
   async shutdown(): Promise<void> {
-    if (!this.kernel.isDisposed) await this.kernel.shutdown();
+    if (this.session && !this.session.isDisposed) {
+      // 关 session = 删 /api/sessions 行 + 停内核（一次性，Running 标签页立刻消失）。
+      await this.session.shutdown();
+    } else if (!this.kernel.isDisposed) {
+      await this.kernel.shutdown();
+    }
   }
 
   dispose(): void {
-    try {
-      this.kernel.dispose();
-    } catch {
-      /* already disposed */
-    }
+    try { this.session?.dispose(); } catch { /* already disposed */ }
+    try { this.kernel.dispose(); } catch { /* already disposed */ }
   }
 
   get isDisposed(): boolean {

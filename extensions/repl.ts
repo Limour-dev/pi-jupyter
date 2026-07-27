@@ -18,6 +18,8 @@
  *   JUPYTER_WORKING_DIR   base dir for relative save_notebook paths
  *   JUPYTER_TIMEOUT_RESTART_KERNEL=1  auto-restart a kernel still busy after
  *                                     a timeout (state lost)
+ *   JUPYTER_BIND_SESSION=0  disable binding the kernel to an /api/sessions
+ *                           row (default on: kernel shows in Running UI)
  * After editing, run `/reload` in pi.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";

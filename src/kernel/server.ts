@@ -12,17 +12,24 @@
  * to XSRF checking and rejects POST with "'_xsrf' argument missing".  So we
  * never set init.headers for auth here.
  */
-import { KernelManager, ServerConnection } from "@jupyterlab/services";
+import { KernelManager, ServerConnection, SessionManager } from "@jupyterlab/services";
 import { createRequire } from "node:module";
 import type { ShimConfig } from "../config";
 import { JupyterKernel } from "./kernel";
-import type { KernelPort, KernelSpecInfo, KernelSpecList, ServerPort } from "./port";
+import type {
+  KernelPort,
+  KernelSpecInfo,
+  KernelSpecList,
+  ServerPort,
+  StartKernelOpts,
+} from "./port";
 
 export class JupyterServer implements ServerPort {
   readonly settings: ServerConnection.ISettings;
   private kernels: KernelManager;
+  private sessions?: SessionManager; // 懒加载，仅 bind 模式用到
 
-  constructor(config: ShimConfig) {
+  constructor(private config: ShimConfig) {
     const baseUrl = config.url.replace(/\/?$/, "/");
     const wsUrl = baseUrl.replace(/^http/, "ws");
 
@@ -84,12 +91,30 @@ export class JupyterServer implements ServerPort {
     );
     return { default: body.default ?? "", specs };
   }
-  async startKernel(name: string): Promise<KernelPort> {
+  async startKernel(name: string, opts?: StartKernelOpts): Promise<KernelPort> {
+    const bind = this.config.bindSession ?? true;
+    if (bind && opts?.sessionPath) {
+      // 懒建 SessionManager（构造时会自带/复用 KernelManager，仅 serverSettings 即可）。
+      const mgr = (this.sessions ??= new SessionManager({
+        serverSettings: this.settings,
+        kernelManager: this.kernels,
+      }));
+      const session = await mgr.startNew({
+        path: opts.sessionPath,
+        name: opts.sessionName ?? opts.sessionPath,
+        type: "notebook",
+        kernel: { name },
+      });
+      const k = session.kernel;
+      if (!k) throw new Error("[pi-jupyter] session started without a kernel connection");
+      return new JupyterKernel(k, session);
+    }
     const connection = await this.kernels.startNew({ name });
     return new JupyterKernel(connection);
   }
 
   dispose(): void {
+    try { this.sessions?.dispose(); } catch { /* ignore */ }
     this.kernels.dispose();
   }
 }

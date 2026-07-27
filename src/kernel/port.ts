@@ -39,6 +39,14 @@ export type KernelSpecList = {
   specs: KernelSpecInfo[];
 };
 
+/** Options for starting a kernel, optionally binding it to a Jupyter session. */
+export type StartKernelOpts = {
+  /** 绑定的虚拟 notebook 路径；提供时建 /api/sessions 行，使内核出现在 Running UI。 */
+  sessionPath?: string;
+  /** Running UI 里显示的 name。 */
+  sessionName?: string;
+};
+
 /** What the session needs from a live kernel. */
 export interface KernelPort {
   execute(code: string, opts?: ExecuteOptions): Promise<ExecuteOutcome>;
@@ -61,7 +69,7 @@ export interface ServerPort {
   ping(): Promise<void>;
   /** GET /api/kernelspecs — list available kernels (UX-7). */
   listKernelSpecs(): Promise<KernelSpecList>;
-  /** POST /api/kernels — start a kernel, return a live port. */
-  startKernel(name: string): Promise<KernelPort>;
+  /** 起内核；传 opts.sessionPath 时额外建一个 session，使其出现在 Jupyter Running UI。 */
+  startKernel(name: string, opts?: StartKernelOpts): Promise<KernelPort>;
   dispose(): void;
 }

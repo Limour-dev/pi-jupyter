@@ -42,6 +42,7 @@ Optional config file: `~/.pi-jupyter/config.json`
 | `JUPYTER_INSTALL_TIMEOUT_MS` | `600000` | `%pip` install timeout |
 | `JUPYTER_WORKING_DIR` | process cwd | Base dir for relative `save_notebook` paths |
 | `JUPYTER_TIMEOUT_RESTART_KERNEL` | off | Restart a kernel still busy after a timeout (state lost) |
+| `JUPYTER_BIND_SESSION` | on | Bind the kernel to an `/api/sessions` row so it shows in the Jupyter Running UI (`=0` restores bare-kernel behavior) |
 
 ## Multiple languages (R and others)
 

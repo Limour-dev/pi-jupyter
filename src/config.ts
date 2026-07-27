@@ -31,6 +31,8 @@ export interface ShimConfig {
   workingDir: string;
   /** Restart the kernel when it is still busy after a timeout (BUG-6). */
   timeoutRestartKernel: boolean;
+  /** 把内核绑到 /api/sessions 行，使其出现在 Jupyter Running UI。缺省 true。 */
+  bindSession?: boolean;
 }
 
 export const CONFIG_HINT =
@@ -82,6 +84,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       env.JUPYTER_WORKING_DIR ?? (file.workingDir as string | undefined) ?? process.cwd(),
     timeoutRestartKernel:
       env.JUPYTER_TIMEOUT_RESTART_KERNEL === "1" || file.timeoutRestartKernel === true,
+    bindSession:
+      env.JUPYTER_BIND_SESSION === "1" ? true
+      : env.JUPYTER_BIND_SESSION === "0" ? false
+      : (file.bindSession as boolean | undefined),
   };
 }
 

@@ -65,7 +65,10 @@ export class RemoteSession implements Session {
     // so a typo (or a display name like "R" instead of "ir") fails with a
     // clear, actionable message (UX-7).
     this.kernelSpec = await this.resolveKernelSpec();
-    this.kernel = await this.server.startKernel(this.config.kernelName);
+    this.kernel = await this.server.startKernel(this.config.kernelName, {
+      sessionPath: `${this.notebookId}.ipynb`,
+      sessionName: this.notebookId,
+    });
     await this.kernel.waitConnected();
 
     // Idempotent bootstrap + missing-package warnings (python-only, BUG-4).
@@ -174,6 +177,7 @@ export class RemoteSession implements Session {
       if (this.kernel && !this.kernel.isDisposed) await this.kernel.shutdown();
     } finally {
       this.disposeKernel();
+      try { this.server.dispose(); } catch { /* ignore */ } // 释放 SessionManager，防监听/轮询泄漏
     }
   }
 
@@ -279,7 +283,10 @@ export class RemoteSession implements Session {
       }
       old.dispose();
     }
-    this.kernel = await this.server.startKernel(this.config.kernelName);
+    this.kernel = await this.server.startKernel(this.config.kernelName, {
+      sessionPath: `${this.notebookId}.ipynb`,
+      sessionName: this.notebookId,
+    });
     await this.kernel.waitConnected();
     await this.bootstrap();
     if (this.deps.size > 0) {
