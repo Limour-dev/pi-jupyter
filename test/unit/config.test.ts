@@ -13,6 +13,8 @@ beforeAll(() => {
 afterEach(() => {
   delete process.env.JUPYTER_REMOTE_URL;
   delete process.env.JUPYTER_REMOTE_TOKEN;
+  delete process.env.JUPYTER_REMOTE_AUTOSAVE;
+  delete process.env.JUPYTER_REMOTE_SAVE_PATH;
 });
 
 const BASE = {
@@ -61,6 +63,20 @@ describe("loadConfig", () => {
 
   it("throws when token is missing", () => {
     expect(() => loadConfig({ JUPYTER_REMOTE_URL: "http://x" })).toThrow(/TOKEN not set/);
+  });
+
+  it("remote auto-save defaults on; env 0/1 toggles it (FR-7.1)", () => {
+    expect(loadConfig(BASE).remoteAutoSave).toBe(true);
+    expect(loadConfig({ ...BASE, JUPYTER_REMOTE_AUTOSAVE: "0" }).remoteAutoSave).toBe(false);
+    expect(loadConfig({ ...BASE, JUPYTER_REMOTE_AUTOSAVE: "1" }).remoteAutoSave).toBe(true);
+  });
+
+  it("remoteSavePath: unset by default, env wins, blank means unset (FR-7.2)", () => {
+    expect(loadConfig(BASE).remoteSavePath).toBeUndefined();
+    expect(loadConfig({ ...BASE, JUPYTER_REMOTE_SAVE_PATH: "notes/pi.ipynb" }).remoteSavePath).toBe(
+      "notes/pi.ipynb",
+    );
+    expect(loadConfig({ ...BASE, JUPYTER_REMOTE_SAVE_PATH: "  " }).remoteSavePath).toBeUndefined();
   });
 });
 

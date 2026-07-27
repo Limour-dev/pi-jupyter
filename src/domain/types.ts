@@ -81,6 +81,25 @@ export type RuntimeStatus = {
   status: string;
   lifecycle: string;
   warnings?: string[];
+  /** Outcome of the most recent remote auto-save (FR-6.4), if any. */
+  lastAutoSave?: AutoSaveInfo;
+};
+
+/** Emitted to `Session.onAutoSave` after each remote auto-save attempt. */
+export type AutoSaveEvent = {
+  ok: boolean;
+  /** The remote contents path written to. */
+  path: string;
+  error?: string;
+};
+
+/** Record of the latest remote auto-save attempt (observability, FR-6.4). */
+export type AutoSaveInfo = {
+  path: string;
+  /** ISO timestamp of the attempt. */
+  at: string;
+  ok: boolean;
+  error?: string;
 };
 
 /**
@@ -98,6 +117,11 @@ export interface Session {
   close(): Promise<void>;
   getRuntimeStatus(): Promise<RuntimeStatus | undefined>;
   readonly executionViewChanges$: ObservableLike<CellResult>;
+  /**
+   * Optional side-channel notified after each remote auto-save attempt
+   * (FR-6.2). Failures are by-passed — they never affect `runCell`.
+   */
+  onAutoSave?: (event: AutoSaveEvent) => void;
 }
 
 // ── Errors ──────────────────────────────────────────────────────────────────

@@ -68,7 +68,49 @@ async function main() {
   await session.saveNotebook(savePath);
   console.log(`   ✓ saved to ${savePath}`);
 
-  console.log("\n8. Shutdown...");
+  console.log("\n8. Remote auto-save (IT-1: snapshot lands on the server)...");
+  const base = config.url.replace(/\/?$/, "/");
+  const authHeaders = { Authorization: `token ${config.token}` };
+  const effectivePath = `${session.notebookId}.ipynb`;
+  await session.flushAutoSave(); // deterministic: drain the background worker
+  const contentsRes = await fetch(`${base}api/contents/${effectivePath}`, {
+    headers: authHeaders,
+  });
+  console.log(`   ✓ GET /api/contents/${effectivePath} -> HTTP ${contentsRes.status}`);
+  if (contentsRes.status !== 200) throw new Error("auto-saved notebook not found on the server");
+  const remoteNb = (await contentsRes.json()) as { type?: string; content?: { cells?: unknown[] } };
+  if (remoteNb.type !== "notebook") throw new Error("remote file is not a notebook");
+  const remoteCells = remoteNb.content?.cells?.length ?? -1;
+  console.log(`   ✓ remote snapshot cells: ${remoteCells} (expected 4)`);
+  if (remoteCells !== 4) throw new Error(`expected 4 remote cells, got ${remoteCells}`);
+
+  console.log("\n9. Sync invariant (IT-2: /api/sessions row shares the same path)...");
+  const sessionsRes = await fetch(`${base}api/sessions`, { headers: authHeaders });
+  const sessions = (await sessionsRes.json()) as Array<{
+    path?: string;
+    kernel?: { id?: string; name?: string; execution_state?: string };
+  }>;
+  const row = sessions.find((s) => s.path === effectivePath);
+  if (!row?.kernel?.id) throw new Error(`no /api/sessions row for ${effectivePath}`);
+  console.log(
+    `   ✓ session row: path=${row.path}, kernel=${row.kernel.id} (${row.kernel.name ?? "?"}, ${row.kernel.execution_state ?? "?"})`,
+  );
+
+  console.log("\n10. Sub-directory target (IT-3: remoteSavePath auto-creates dirs)...");
+  const subConfig = { ...config, remoteSavePath: `pi-test-${Date.now()}/auto.ipynb` };
+  const subServer = new JupyterServer(subConfig);
+  const subSession = new RemoteSession(subServer, subConfig, { peerLabel: "smoke-subdir" });
+  await subSession.initialize();
+  await subSession.runCell("z = 7");
+  await subSession.flushAutoSave();
+  const subRes = await fetch(`${base}api/contents/${subConfig.remoteSavePath}`, {
+    headers: authHeaders,
+  });
+  console.log(`   ✓ GET /api/contents/${subConfig.remoteSavePath} -> HTTP ${subRes.status}`);
+  if (subRes.status !== 200) throw new Error("sub-directory auto-save target not created");
+  await subSession.shutdown();
+
+  console.log("\n11. Shutdown...");
   await session.shutdown();
   console.log("   ✓ kernel shut down");
 

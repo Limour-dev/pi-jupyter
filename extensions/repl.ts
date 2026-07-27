@@ -20,6 +20,12 @@
  *                                     a timeout (state lost)
  *   JUPYTER_BIND_SESSION=0  disable binding the kernel to an /api/sessions
  *                           row (default on: kernel shows in Running UI)
+ *   JUPYTER_REMOTE_AUTOSAVE=0  disable the automatic snapshot upload to the
+ *                              remote server after each cell (default on;
+ *                              the file lands in the remote $HOME so the same
+ *                              kernel can be re-opened in a browser)
+ *   JUPYTER_REMOTE_SAVE_PATH   remote contents path override, e.g.
+ *                              "notes/pi.ipynb" (default: <notebookId>.ipynb)
  * After editing, run `/reload` in pi.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -256,6 +262,13 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     async execute(_toolCallId, params: JupyterParams, signal, onUpdate, ctx) {
       if (signal?.aborted) throw new Error("aborted");
       const sess = await ensureSession(params.dependencies ?? [], ctx.cwd);
+      // Side-channel for the remote auto-save (FR-6.2): failures are notified
+      // to the user but never touch this tool's result (by-pass, FR-6.1).
+      sess.onAutoSave = (e) => {
+        if (!e.ok) {
+          ctx.ui?.notify(`[pi-jupyter] remote auto-save failed (${e.path}): ${e.error}`, "warning");
+        }
+      };
       const timeoutSecs = Math.max(1, params.timeout_secs ?? 120);
       const result = await sess.runCell(params.code, {
         timeoutMs: Math.round(timeoutSecs * 1000),

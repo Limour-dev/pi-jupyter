@@ -71,5 +71,12 @@ export interface ServerPort {
   listKernelSpecs(): Promise<KernelSpecList>;
   /** 起内核；传 opts.sessionPath 时额外建一个 session，使其出现在 Jupyter Running UI。 */
   startKernel(name: string, opts?: StartKernelOpts): Promise<KernelPort>;
+  /**
+   * Write an nbformat model to a remote contents path via
+   * `PUT /api/contents/<path>` (create-or-update: 201 when new, 200 when it
+   * already exists). Used by the session's remote auto-save (FR-2). Throws on
+   * a non-ok response; the caller by-passes the failure.
+   */
+  uploadNotebook(contentsPath: string, model: Record<string, unknown>): Promise<void>;
   dispose(): void;
 }

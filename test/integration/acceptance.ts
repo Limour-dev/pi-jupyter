@@ -19,6 +19,7 @@ const BASE: ShimConfig = {
   installTimeoutMs: 300_000,
   workingDir: "/tmp/pj-accept",
   timeoutRestartKernel: false,
+  remoteAutoSave: false,
 };
 
 const ok = (m: string) => console.log(`   ✓ ${m}`);

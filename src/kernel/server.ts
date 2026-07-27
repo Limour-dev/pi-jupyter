@@ -28,6 +28,8 @@ export class JupyterServer implements ServerPort {
   readonly settings: ServerConnection.ISettings;
   private kernels: KernelManager;
   private sessions?: SessionManager; // 懒加载，仅 bind 模式用到
+  /** Parent directories already created on the server (avoids a PUT per cell). */
+  private ensuredDirs = new Set<string>();
 
   constructor(private config: ShimConfig) {
     const baseUrl = config.url.replace(/\/?$/, "/");
@@ -113,10 +115,84 @@ export class JupyterServer implements ServerPort {
     return new JupyterKernel(connection);
   }
 
+  /**
+   * Write an nbformat model to the remote Contents API (FR-2):
+   * `PUT /api/contents/<path>` is create-or-update (201 new / 200 existing).
+   * Some jupyter_server deployments do NOT create missing parent directories
+   * on save (they fail with HTTP 500), so `ensureParentDirs` creates them
+   * first when the path contains sub-directories (R3.4).
+   * Reuses the SAME `ServerConnection.ISettings` (hence the same token/auth
+   * path) as `ping()` / `listKernelSpecs()` — we never set our own
+   * Authorization header (that would trigger the `_xsrf` failure, see the
+   * file header). Throws on a non-ok response; callers by-pass it.
+   */
+  async uploadNotebook(contentsPath: string, model: Record<string, unknown>): Promise<void> {
+    await this.ensureParentDirs(contentsPath);
+    const url = `${this.settings.baseUrl}api/contents/${encodeContentsPath(contentsPath)}`;
+    const res = await ServerConnection.makeRequest(
+      url,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "notebook", format: "json", content: model }),
+      },
+      this.settings,
+    );
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(
+        `[pi-jupyter] remote save failed: HTTP ${res.status} ${res.statusText} ${detail}`.trim(),
+      );
+    }
+  }
+
+  /**
+   * Create the parent directory of `contentsPath` on the server when needed.
+   * `PUT` with `{type:"directory"}` is idempotent (the server no-ops on an
+   * existing dir and `os.makedirs` is recursive), and successful parents are
+   * cached so steady-state cells cost zero extra requests.
+   */
+  private async ensureParentDirs(contentsPath: string): Promise<void> {
+    const idx = contentsPath.lastIndexOf("/");
+    if (idx <= 0) return; // file sits at the contents root
+    const parent = contentsPath.slice(0, idx);
+    if (this.ensuredDirs.has(parent)) return;
+    const url = `${this.settings.baseUrl}api/contents/${encodeContentsPath(parent)}`;
+    const res = await ServerConnection.makeRequest(
+      url,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "directory", format: "json", content: {} }),
+      },
+      this.settings,
+    );
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(
+        `[pi-jupyter] could not create remote directory "${parent}": ` +
+          `HTTP ${res.status} ${res.statusText} ${detail}`.trim(),
+      );
+    }
+    this.ensuredDirs.add(parent);
+  }
+
   dispose(): void {
     try { this.sessions?.dispose(); } catch { /* ignore */ }
     this.kernels.dispose();
   }
+}
+
+/**
+ * Percent-encode a Jupyter contents path segment-by-segment, preserving the
+ * hierarchy slashes (FR-2 / NFR-3). The default file name has no slash, but
+ * `remoteSavePath` may contain sub-directories.
+ */
+export function encodeContentsPath(contentsPath: string): string {
+  return contentsPath
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
 }
 
 /**

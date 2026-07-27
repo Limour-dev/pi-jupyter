@@ -2,11 +2,15 @@
   "$comment": "Copy to ~/.pi-jupyter/config.json — env vars take precedence over this file.",
   "$comment.kernelName": "Must be a kernelspec *name* (see GET /api/kernelspecs): e.g. \"python3\", or \"ir\" for R — NOT a display name like \"R\".",
   "$comment.extras": "Optional fields: \"workingDir\": \"/path/to/project\" (base for relative save paths), \"timeoutRestartKernel\": true (auto-restart a kernel still busy after a timeout; state is lost), and \"bindSession\": true (bind the kernel to an /api/sessions row so it shows up in the Jupyter Running UI; defaults to true).",
+  "$comment.remoteAutoSave": "After each jupyter_repl cell, automatically upload the notebook snapshot to the remote server (Contents API). Defaults to true; set false to disable. The file lands at the contents root == the remote $HOME in a default deployment, under <notebookId>.ipynb, so opening it in a browser reuses the SAME kernel.",
+  "$comment.remoteSavePath": "Override the remote contents path, e.g. \"notes/pi.ipynb\" (sub-directories are created automatically). Empty string == default <notebookId>.ipynb. \"..\" segments are rejected."
   "url": "http://192.168.105.1:57002",
   "token": "your-token-here",
   "kernelName": "python3",
   "tlsInsecure": false,
   "defaultTimeoutMs": 300000,
   "installTimeoutMs": 600000,
-  "bindSession": true
+  "bindSession": true,
+  "remoteAutoSave": true,
+  "remoteSavePath": ""
 }

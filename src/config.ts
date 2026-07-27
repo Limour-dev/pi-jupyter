@@ -33,6 +33,10 @@ export interface ShimConfig {
   timeoutRestartKernel: boolean;
   /** 把内核绑到 /api/sessions 行，使其出现在 Jupyter Running UI。缺省 true。 */
   bindSession?: boolean;
+  /** 每次 jupyter_repl 结束后自动把快照落盘到远端。缺省 true（FR-7.1）。 */
+  remoteAutoSave: boolean;
+  /** 远端 contents 相对 path，覆盖默认的 `${notebookId}.ipynb`（FR-3.4）。 */
+  remoteSavePath?: string;
 }
 
 export const CONFIG_HINT =
@@ -88,6 +92,13 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       env.JUPYTER_BIND_SESSION === "1" ? true
       : env.JUPYTER_BIND_SESSION === "0" ? false
       : (file.bindSession as boolean | undefined),
+    remoteAutoSave:
+      env.JUPYTER_REMOTE_AUTOSAVE === "0" ? false
+      : env.JUPYTER_REMOTE_AUTOSAVE === "1" ? true
+      : (file.remoteAutoSave as boolean | undefined) ?? true,
+    remoteSavePath: nonEmpty(
+      env.JUPYTER_REMOTE_SAVE_PATH ?? (file.remoteSavePath as string | undefined),
+    ),
   };
 }
 
@@ -104,4 +115,10 @@ export function isConfigured(env: Record<string, string | undefined> = process.e
 function intEnv(env: Record<string, string | undefined>, k: string): number | undefined {
   const v = env[k];
   return v ? Number.parseInt(v, 10) : undefined;
+}
+
+/** Trimmed value, or undefined when empty/blank (空串视同未设置). */
+function nonEmpty(v: string | undefined): string | undefined {
+  const t = v?.trim();
+  return t ? t : undefined;
 }

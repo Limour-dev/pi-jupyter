@@ -1,10 +1,11 @@
 /**
  * RemoteSession — the Session contract, implemented against the KernelPort seam.
  *
- * Owns the kernel lifecycle, cell history (for .ipynb export), the dependency
- * set, and the executionViewChanges$ subject.  All execution goes through
- * `KernelPort.execute()` — this class never imports `@jupyterlab/services`,
- * which is what makes it unit-testable with a mock port.
+ * Owns the kernel lifecycle, cell history (for .ipynb export and the remote
+ * autosave snapshot), the dependency set, and the executionViewChanges$
+ * subject.  All execution goes through `KernelPort.execute()` — this class
+ * never imports `@jupyterlab/services`, which is what makes it unit-testable
+ * with a mock port.
  */
 import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -16,6 +17,8 @@ import { buildNotebook, type CellRecord, type NotebookMeta } from "./domain/note
 import { stripAnsi } from "./domain/output";
 import { Subject } from "./domain/subject";
 import {
+  type AutoSaveEvent,
+  type AutoSaveInfo,
   type CellResult,
   type CreateSessionOpts,
   type JsOutput,
@@ -32,8 +35,17 @@ import type {
   ServerPort,
 } from "./kernel/port";
 
+/** Cap on waiting for the final auto-save during shutdown (R9.2). */
+const SHUTDOWN_FLUSH_TIMEOUT_MS = 30_000;
+
+/** Default cap for an explicit `flushAutoSave()` call. */
+const FLUSH_TIMEOUT_MS = 30_000;
+
 export class RemoteSession implements Session {
   readonly notebookId: string;
+
+  /** Side-channel notified after every remote auto-save attempt (FR-6.2). */
+  onAutoSave?: (event: AutoSaveEvent) => void;
 
   private kernel: KernelPort | null = null;
   private kernelSpec: KernelSpecInfo | null = null;
@@ -41,6 +53,18 @@ export class RemoteSession implements Session {
   private cells: CellRecord[] = [];
   private deps = new Set<string>();
   private warnings: string[] = [];
+  /** Outcome of the most recent remote auto-save (FR-6.4). */
+  private lastAutoSave?: AutoSaveInfo;
+
+  // ── remote auto-save worker (FR-5): single serial loop, dirty-flag coalesce ──
+  /** Contents path shared by bind-session and auto-save (INV-1). */
+  private effectivePath: string | null = null;
+  /** Path-config warning, re-appended after every bootstrap (which resets warnings). */
+  private effectivePathWarning?: string;
+  private autoSaveDirty = false;
+  private autoSaveRunning = false;
+  private autoSaveChain: Promise<void> = Promise.resolve();
+
   private viewChanges = new Subject<CellResult>();
 
   constructor(
@@ -65,14 +89,18 @@ export class RemoteSession implements Session {
     // so a typo (or a display name like "R" instead of "ir") fails with a
     // clear, actionable message (UX-7).
     this.kernelSpec = await this.resolveKernelSpec();
+    // effectivePath is the single source of truth shared by the bind-session
+    // row and the remote auto-save target (INV-1).
+    this.effectivePath = this.computeEffectivePath();
     this.kernel = await this.server.startKernel(this.config.kernelName, {
-      sessionPath: `${this.notebookId}.ipynb`,
+      sessionPath: this.effectivePath,
       sessionName: this.notebookId,
     });
     await this.kernel.waitConnected();
 
     // Idempotent bootstrap + missing-package warnings (python-only, BUG-4).
     await this.bootstrap();
+    if (this.effectivePathWarning) this.warnings.push(this.effectivePathWarning);
 
     if (this.deps.size > 0) await this.install([...this.deps]);
   }
@@ -140,6 +168,10 @@ export class RemoteSession implements Session {
 
     this.cells.push({ source, result: partial });
     this.viewChanges.next(partial);
+    // Snapshot auto-save after every cell record — done/error/timeout alike
+    // (FR-1.2). Runs in the background and is never awaited, so a failure can
+    // never change this result (FR-6.1).
+    this.scheduleAutoSave();
     return partial;
   }
 
@@ -156,6 +188,17 @@ export class RemoteSession implements Session {
   // ── save to disk ──────────────────────────────────────────────────────────
 
   /**
+   * Serialize the current cell history to a nbformat object (pure JSON).
+   * Shared by the local `saveNotebook` and the remote auto-save worker so
+   * both snapshots stay byte-for-byte consistent (FR-8.2). The worker calls
+   * this afresh before every PUT, so a stale snapshot can never clobber a
+   * newer one (FR-5.2).
+   */
+  toNotebookObject(): Record<string, unknown> {
+    return buildNotebook(this.cells, this.notebookMeta());
+  }
+
+  /**
    * Write the session to an `.ipynb`.  Returns the path actually written
    * (callers should pass an absolute path; BUG-3).  The notebook header
    * reflects the real kernelspec/language (BUG-2).
@@ -163,16 +206,16 @@ export class RemoteSession implements Session {
   async saveNotebook(path?: string): Promise<string> {
     const savePath = path ?? `${this.notebookId}.ipynb`;
     mkdirSync(dirname(savePath), { recursive: true });
-    writeFileSync(
-      savePath,
-      JSON.stringify(buildNotebook(this.cells, this.notebookMeta()), null, 1),
-    );
+    writeFileSync(savePath, JSON.stringify(this.toNotebookObject(), null, 1));
     return savePath;
   }
 
   // ── lifecycle ─────────────────────────────────────────────────────────────
 
   async shutdown(): Promise<void> {
+    // Flush the final snapshot before tearing down kernel/server (FR-9).
+    // By-passed on failure and capped, so shutdown cannot hang (R9.2).
+    await this.flushAutoSave(SHUTDOWN_FLUSH_TIMEOUT_MS);
     try {
       if (this.kernel && !this.kernel.isDisposed) await this.kernel.shutdown();
     } finally {
@@ -191,6 +234,7 @@ export class RemoteSession implements Session {
       status: this.kernel.connectionStatus,
       lifecycle: this.kernel.isDisposed ? "stopped" : "running",
       warnings: this.warnings,
+      lastAutoSave: this.lastAutoSave,
     };
   }
 
@@ -268,6 +312,108 @@ export class RemoteSession implements Session {
     };
   }
 
+  // ── remote auto-save (FR-1 … FR-6, FR-9) ───────────────────────────────────
+
+  /**
+   * Resolve the single contents path used for BOTH the bind-session row and
+   * the remote auto-save target (INV-1). Defaults to `${notebookId}.ipynb` at
+   * the contents root, which in a default jupyter_server deployment equals the
+   * REMOTE user's $HOME (§9.1: root_dir == $HOME). The LOCAL home directory is
+   * never consulted here (red line, §9.2).
+   */
+  private computeEffectivePath(): string {
+    const fallback = `${this.notebookId}.ipynb`;
+    const raw = this.config.remoteSavePath;
+    if (!raw) return fallback;
+    // Contents paths are relative to root_dir — drop any leading slashes.
+    const relative = raw.replace(/^\/+/, "");
+    if (relative.split("/").some((segment) => segment === "..")) {
+      // bootstrap() resets this.warnings, so keep the warning for re-append.
+      this.effectivePathWarning =
+        `remoteSavePath "${raw}" contains a ".." segment — path traversal is ` +
+        `not allowed; falling back to ${fallback}`;
+      return fallback;
+    }
+    return relative;
+  }
+
+  /**
+   * Mark the snapshot dirty and wake the serial worker (FR-5.3). Never
+   * awaits: auto-save must not add latency to `runCell` (R5.1). A complete
+   * no-op when `remoteAutoSave` is off (R7.1).
+   */
+  private scheduleAutoSave(): void {
+    if (!this.config.remoteAutoSave || !this.effectivePath) return;
+    this.autoSaveDirty = true;
+    this.pumpAutoSave();
+  }
+
+  private pumpAutoSave(): void {
+    if (this.autoSaveRunning) return; // the loop re-checks the dirty flag each round
+    this.autoSaveRunning = true;
+    this.autoSaveChain = this.autoSaveChain
+      .catch(() => undefined) // keep the chain alive after an unexpected throw
+      .then(() => this.autoSaveLoop());
+  }
+
+  /**
+   * Serial worker: at most one PUT in flight. Each round clears the dirty
+   * flag and THEN serializes, so any later PUT carries the same-or-newer
+   * cells — an older snapshot can never overwrite a newer one (FR-5.2).
+   * Consecutive triggers therefore coalesce into at most an in-flight plus a
+   * trailing PUT (FR-5.3).
+   */
+  private async autoSaveLoop(): Promise<void> {
+    try {
+      while (this.autoSaveDirty && this.effectivePath) {
+        this.autoSaveDirty = false;
+        const path = this.effectivePath;
+        const snapshot = this.toNotebookObject(); // fresh AFTER the flag, BEFORE the PUT
+        try {
+          await this.server.uploadNotebook(path, snapshot);
+          this.lastAutoSave = { path, at: new Date().toISOString(), ok: true };
+          this.onAutoSave?.({ ok: true, path });
+        } catch (err) {
+          const message = (err as Error).message;
+          this.lastAutoSave = { path, at: new Date().toISOString(), ok: false, error: message };
+          this.warnings.push(`remote autosave to "${path}" failed: ${message}`);
+          this.onAutoSave?.({ ok: false, path, error: message });
+        }
+      }
+    } finally {
+      this.autoSaveRunning = false;
+    }
+  }
+
+  /**
+   * Force a final round and wait for the worker to drain (FR-9 / tests).
+   * No-op when `remoteAutoSave` is off — never sends a request (R7.1).
+   * Times out instead of hanging forever (R9.2).
+   */
+  async flushAutoSave(timeoutMs: number = FLUSH_TIMEOUT_MS): Promise<void> {
+    if (!this.config.remoteAutoSave) return;
+    if (this.cells.length > 0) {
+      this.autoSaveDirty = true;
+      this.pumpAutoSave();
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        this.autoSaveChain,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("flush timed out")), timeoutMs);
+          timer.unref?.();
+        }),
+      ]);
+    } catch {
+      this.warnings.push(
+        "remote autosave flush timed out; the latest snapshot may not be persisted",
+      );
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   /**
    * Restart the kernel to escape an unrecoverable busy state (BUG-6 recovery
    * policy).  Re-runs bootstrap and reinstalls deps; in-memory state is lost.
@@ -284,11 +430,12 @@ export class RemoteSession implements Session {
       old.dispose();
     }
     this.kernel = await this.server.startKernel(this.config.kernelName, {
-      sessionPath: `${this.notebookId}.ipynb`,
+      sessionPath: this.effectivePath ?? `${this.notebookId}.ipynb`,
       sessionName: this.notebookId,
     });
     await this.kernel.waitConnected();
     await this.bootstrap();
+    if (this.effectivePathWarning) this.warnings.push(this.effectivePathWarning);
     if (this.deps.size > 0) {
       try {
         await this.install([...this.deps]);

@@ -12,6 +12,7 @@ rationale and the lessons carried over from v1.
 - `jupyter_repl` — persistent remote Jupyter kernel; state survives between calls
 - `jupyter_add_dependencies` — hot-install packages (`%pip` / `install.packages`, no restart)
 - `jupyter_save_notebook` — export the session as a valid `.ipynb`
+- **Remote auto-save** — after every cell, the notebook snapshot is uploaded to the remote server (remote `$HOME` by default), so the *same kernel* can be re-opened in a browser
 - `/jupyter-reset` — drop the kernel and start clean
 - Inline matplotlib/PIL images returned to the model
 - Streaming output, execution-timeout interrupt, no orphan kernels on exit
@@ -43,6 +44,31 @@ Optional config file: `~/.pi-jupyter/config.json`
 | `JUPYTER_WORKING_DIR` | process cwd | Base dir for relative `save_notebook` paths |
 | `JUPYTER_TIMEOUT_RESTART_KERNEL` | off | Restart a kernel still busy after a timeout (state lost) |
 | `JUPYTER_BIND_SESSION` | on | Bind the kernel to an `/api/sessions` row so it shows in the Jupyter Running UI (`=0` restores bare-kernel behavior) |
+| `JUPYTER_REMOTE_AUTOSAVE` | on | Upload the notebook snapshot to the remote server after every cell (`=0` disables) |
+| `JUPYTER_REMOTE_SAVE_PATH` | `<notebookId>.ipynb` | Remote contents path for the auto-save, e.g. `notes/pi.ipynb` |
+
+## Remote auto-save
+
+After every `jupyter_repl` cell (success, error, or timeout alike) the session
+snapshot is uploaded to the remote Jupyter Server via the Contents API
+(`PUT /api/contents/<path>`). The upload is a by-pass: it never blocks or
+changes the tool result, rapid cells are coalesced (an older snapshot can
+never overwrite a newer one), and failures only produce a warning.
+
+- **Default target = remote `$HOME`.** The file is written to the contents
+  root as `<notebookId>.ipynb`. In a default `jupyter_server` deployment the
+  contents root *is* the remote user's home directory (`root_dir == $HOME`).
+  If your server set a custom `root_dir`, use `JUPYTER_REMOTE_SAVE_PATH`.
+  The local machine's home directory is never involved.
+- **Open in a browser, reuse the same kernel.** The auto-save path and the
+  `/api/sessions` bind row share one name, so opening that `.ipynb` in
+  JupyterLab connects to the *running* kernel — variables are shared both
+  ways between the browser and the agent.
+- **`JUPYTER_REMOTE_SAVE_PATH`** overrides the path (sub-directories are
+  created automatically; `..` segments are rejected). A fixed name gives a
+  live single-file mirror — intended for single-instance use only.
+- `jupyter_save_notebook` is unchanged: it still writes **locally** and is
+  independent of the remote auto-save.
 
 ## Multiple languages (R and others)
 

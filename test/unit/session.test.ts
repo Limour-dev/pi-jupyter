@@ -6,7 +6,7 @@
  * Server and zero network.
  */
 import { readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ShimConfig } from "../../src/config";
@@ -23,6 +23,7 @@ const CONFIG: ShimConfig = {
   installTimeoutMs: 1000,
   workingDir: "/tmp",
   timeoutRestartKernel: false,
+  remoteAutoSave: true,
 };
 
 /** CONFIG with an R kernelspec selected. */
@@ -59,11 +60,13 @@ function makeServerPort(kernel: KernelPort): ServerPort & {
   ping: ReturnType<typeof vi.fn>;
   listKernelSpecs: ReturnType<typeof vi.fn>;
   startKernel: ReturnType<typeof vi.fn>;
+  uploadNotebook: ReturnType<typeof vi.fn>;
 } {
   return {
     ping: vi.fn().mockResolvedValue(undefined),
     listKernelSpecs: vi.fn().mockResolvedValue(SPECS),
     startKernel: vi.fn().mockResolvedValue(kernel),
+    uploadNotebook: vi.fn().mockResolvedValue(undefined),
     dispose: vi.fn(),
   };
 }
@@ -342,5 +345,165 @@ describe("RemoteSession — bug fixes", () => {
       "python3",
       expect.objectContaining({ sessionPath: expect.any(String) }),
     );
+  });
+});
+
+describe("RemoteSession — remote auto-save (PRD 远端自动落盘)", () => {
+  let kernel: ReturnType<typeof makeKernelPort>;
+  let server: ReturnType<typeof makeServerPort>;
+
+  beforeEach(() => {
+    kernel = makeKernelPort();
+    server = makeServerPort(kernel);
+  });
+
+  it("AC-1: runCell uploads the snapshot to effectivePath with the cell content", async () => {
+    kernel.execute.mockResolvedValue({
+      outputs: [{ outputType: "stream", name: "stdout", text: "hi\n" }],
+      status: "ok" as const,
+      executionCount: 1,
+    });
+    const s = new RemoteSession(server, CONFIG, { notebookId: "nb-auto" });
+    await s.initialize();
+    // INV-1: the bind-session path equals the default auto-save target.
+    expect(server.startKernel).toHaveBeenCalledWith(
+      "python3",
+      expect.objectContaining({ sessionPath: "nb-auto.ipynb" }),
+    );
+    await s.runCell("print('hi')");
+    await s.flushAutoSave();
+    expect(server.uploadNotebook).toHaveBeenCalled();
+    const [path, model] = server.uploadNotebook.mock.calls.at(-1) ?? [];
+    expect(path).toBe("nb-auto.ipynb");
+    const cells = (model as { cells: any[] }).cells;
+    expect(cells).toHaveLength(1);
+    expect(cells[0].source.join("")).toBe("print('hi')");
+    expect(JSON.stringify(cells[0].outputs)).toContain("hi");
+  });
+
+  it("AC-2: error/timeout cells still trigger an upload with an error output", async () => {
+    const s = new RemoteSession(server, CONFIG, { notebookId: "nb-err" });
+    await s.initialize();
+    kernel.execute.mockRejectedValueOnce(new TimeoutError());
+    const r = await s.runCell("while True: pass");
+    expect(r.status).toBe("timeout");
+    await s.flushAutoSave();
+    expect(server.uploadNotebook).toHaveBeenCalled();
+    const model = server.uploadNotebook.mock.calls.at(-1)?.[1] as { cells: any[] };
+    const last = model.cells[model.cells.length - 1];
+    expect(last.outputs.some((o: any) => o.output_type === "error")).toBe(true);
+  });
+
+  it("AC-3: remoteAutoSave=false never uploads (switch off, R7.1)", async () => {
+    const s = new RemoteSession(
+      server,
+      { ...CONFIG, remoteAutoSave: false },
+      { notebookId: "nb-off" },
+    );
+    await s.initialize();
+    await s.runCell("x = 1");
+    await s.flushAutoSave();
+    await s.shutdown();
+    expect(server.uploadNotebook).not.toHaveBeenCalled();
+  });
+
+  it("AC-4: rapid cells coalesce — at most in-flight + trailing PUT, newest snapshot wins", async () => {
+    const s = new RemoteSession(server, CONFIG, { notebookId: "nb-coal" });
+    await s.initialize();
+    server.uploadNotebook.mockClear();
+    await Promise.all([s.runCell("a = 1"), s.runCell("b = 2"), s.runCell("c = 3")]);
+    await s.flushAutoSave();
+    const calls = server.uploadNotebook.mock.calls;
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    expect(calls.length).toBeLessThanOrEqual(2);
+    const lastModel = calls.at(-1)?.[1] as { cells: unknown[] };
+    expect(lastModel.cells).toHaveLength(3);
+  });
+
+  it("AC-5: upload failure is by-passed — runCell returns, warning + onAutoSave{ok:false}", async () => {
+    server.uploadNotebook.mockRejectedValue(new Error("boom 500"));
+    const events: Array<{ ok: boolean; path: string; error?: string }> = [];
+    const s = new RemoteSession(server, CONFIG, { notebookId: "nb-fail" });
+    s.onAutoSave = (e) => events.push(e);
+    await s.initialize();
+    const r = await s.runCell("x = 1");
+    expect(r.status).toBe("done");
+    expect(r.success).toBe(true);
+    await s.flushAutoSave();
+    const status = await s.getRuntimeStatus();
+    expect(status?.warnings?.some((w) => w.includes("boom 500"))).toBe(true);
+    expect(events.some((e) => e.ok === false && /boom 500/.test(e.error ?? ""))).toBe(true);
+    expect(status?.lastAutoSave?.ok).toBe(false);
+  });
+
+  it("AC-6: shutdown flushes the final snapshot", async () => {
+    const s = new RemoteSession(server, CONFIG, { notebookId: "nb-shut" });
+    await s.initialize();
+    server.uploadNotebook.mockClear();
+    await s.runCell("final = 42");
+    await s.shutdown();
+    expect(server.uploadNotebook).toHaveBeenCalled();
+    const lastModel = server.uploadNotebook.mock.calls.at(-1)?.[1] as { cells: unknown[] };
+    expect(lastModel.cells).toHaveLength(1);
+  });
+
+  it("AC-7: remoteSavePath overrides the path for BOTH upload and bind-session (INV-1)", async () => {
+    const s = new RemoteSession(
+      server,
+      { ...CONFIG, remoteSavePath: "a/b.ipynb" },
+      { notebookId: "nb-path" },
+    );
+    await s.initialize();
+    expect(server.startKernel).toHaveBeenCalledWith(
+      "python3",
+      expect.objectContaining({ sessionPath: "a/b.ipynb" }),
+    );
+    await s.runCell("x = 1");
+    await s.flushAutoSave();
+    expect(server.uploadNotebook.mock.calls.length).toBeGreaterThan(0);
+    expect(server.uploadNotebook.mock.calls.every((c) => c[0] === "a/b.ipynb")).toBe(true);
+  });
+
+  it("AC-8: paths never contain the LOCAL home directory (red line, §9.2)", async () => {
+    const s = new RemoteSession(server, CONFIG, { notebookId: "nb-home" });
+    await s.initialize();
+    await s.runCell("x = 1");
+    await s.flushAutoSave();
+    const home = homedir();
+    const boundPath = (server.startKernel.mock.calls[0][1] as { sessionPath: string }).sessionPath;
+    expect(boundPath).not.toContain(home);
+    for (const [p] of server.uploadNotebook.mock.calls) {
+      expect(String(p)).not.toContain(home);
+    }
+  });
+
+  it("AC-8b: a remoteSavePath with a .. segment is rejected with a warning", async () => {
+    const s = new RemoteSession(
+      server,
+      { ...CONFIG, remoteSavePath: "../escape.ipynb" },
+      { notebookId: "nb-dotdot" },
+    );
+    await s.initialize();
+    expect(server.startKernel).toHaveBeenCalledWith(
+      "python3",
+      expect.objectContaining({ sessionPath: "nb-dotdot.ipynb" }),
+    );
+    await s.runCell("x = 1");
+    await s.flushAutoSave();
+    expect(server.uploadNotebook.mock.calls.every((c) => c[0] === "nb-dotdot.ipynb")).toBe(true);
+    expect((await s.getRuntimeStatus())?.warnings?.some((w) => w.includes('".."'))).toBe(true);
+  });
+
+  it("AC-9: local saveNotebook and the remote snapshot share one serializer", async () => {
+    const s = new RemoteSession(server, CONFIG, { notebookId: "nb-shared" });
+    await s.initialize();
+    await s.runCell("y = 2");
+    await s.flushAutoSave();
+    const p = join(tmpdir(), `pi-jupyter-shared-${Date.now()}.ipynb`);
+    await s.saveNotebook(p);
+    const local = JSON.parse(readFileSync(p, "utf-8"));
+    const remote = server.uploadNotebook.mock.calls.at(-1)?.[1];
+    expect(local).toEqual(remote);
+    rmSync(p, { force: true });
   });
 });
