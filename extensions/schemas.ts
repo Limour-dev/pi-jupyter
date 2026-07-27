@@ -5,7 +5,7 @@
  */
 import { Type, type Static } from "typebox";
 
-export const PYTHON_PARAMS = Type.Object({
+export const JUPYTER_PARAMS = Type.Object({
   code: Type.String({
     description:
       "Python source to execute in the persistent remote notebook session. Use print(...) for side effects; the last expression's repr is returned as the result.",
@@ -39,6 +39,6 @@ export const SAVE_NOTEBOOK_PARAMS = Type.Object({
   ),
 });
 
-export type PythonParams = Static<typeof PYTHON_PARAMS>;
+export type JupyterParams = Static<typeof JUPYTER_PARAMS>;
 export type AddDependenciesParams = Static<typeof ADD_DEPENDENCIES_PARAMS>;
 export type SaveNotebookParams = Static<typeof SAVE_NOTEBOOK_PARAMS>;

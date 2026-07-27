@@ -1,6 +1,6 @@
 # pi-jupyter v2 — Architecture
 
-> A remote Jupyter-backed Python REPL for pi coding agents. Pure TypeScript,
+> A remote Jupyter-backed REPL for pi coding agents. Pure TypeScript,
 > no local backend — the remote Jupyter Server **is** the backend, reached via
 > the official `@jupyterlab/services` client.
 

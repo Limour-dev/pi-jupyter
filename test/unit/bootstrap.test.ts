@@ -22,7 +22,7 @@ describe("bootstrap constants", () => {
 describe("parseMissingPackages", () => {
   it("parses the last JSON line", () => {
     expect(parseMissingPackages('{"missing": ["matplotlib", "pandas"]}')).toEqual([
-      "missing packages in remote kernel: matplotlib, pandas — use python_add_dependencies",
+      "missing packages in remote kernel: matplotlib, pandas — use jupyter_add_dependencies",
     ]);
   });
 

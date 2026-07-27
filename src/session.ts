@@ -102,7 +102,7 @@ export class RemoteSession implements Session {
         } else {
           throw new Error(
             "[pi-jupyter] kernel still busy after a previous timeout. " +
-              "Run /python-reset to start fresh, or set timeoutRestartKernel " +
+              "Run /jupyter-reset to start fresh, or set timeoutRestartKernel " +
               "(JUPYTER_TIMEOUT_RESTART_KERNEL=1) to auto-recover (state will be lost).",
           );
         }

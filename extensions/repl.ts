@@ -32,10 +32,10 @@ import { RemoteSession } from "../src/session";
 import { formatResult } from "./format";
 import {
   ADD_DEPENDENCIES_PARAMS,
-  PYTHON_PARAMS,
+  JUPYTER_PARAMS,
   SAVE_NOTEBOOK_PARAMS,
   type AddDependenciesParams,
-  type PythonParams,
+  type JupyterParams,
   type SaveNotebookParams,
 } from "./schemas";
 
@@ -73,36 +73,36 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     // Register every tool even when unconfigured, so the tool list is stable
     // before/after configuration; each stub fails with the same hint (UX-8).
     pi.registerTool({
-      name: "python_repl",
-      label: "Python REPL",
+      name: "jupyter_repl",
+      label: "Jupyter REPL",
       description:
         "Execute code in a persistent REPL on a remote Jupyter Server. Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
       promptSnippet:
-        "python_repl: run code on a remote Jupyter kernel (not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN, or ~/.pi-jupyter/config.json).",
-      parameters: PYTHON_PARAMS,
+        "jupyter_repl: run code on a remote Jupyter kernel (not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN, or ~/.pi-jupyter/config.json).",
+      parameters: JUPYTER_PARAMS,
       async execute() {
         throw new Error(CONFIG_HINT);
       },
     });
     pi.registerTool({
-      name: "python_add_dependencies",
+      name: "jupyter_add_dependencies",
       label: "Add Dependencies",
       description:
         "Install packages into the remote kernel's environment. Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
       promptSnippet:
-        "python_add_dependencies: not configured (set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN, or ~/.pi-jupyter/config.json).",
+        "jupyter_add_dependencies: not configured (set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN, or ~/.pi-jupyter/config.json).",
       parameters: ADD_DEPENDENCIES_PARAMS,
       async execute() {
         throw new Error(CONFIG_HINT);
       },
     });
     pi.registerTool({
-      name: "python_save_notebook",
+      name: "jupyter_save_notebook",
       label: "Save Notebook",
       description:
         "Save the current session as an .ipynb file. Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
       promptSnippet:
-        "python_save_notebook: not configured (set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN, or ~/.pi-jupyter/config.json).",
+        "jupyter_save_notebook: not configured (set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN, or ~/.pi-jupyter/config.json).",
       parameters: SAVE_NOTEBOOK_PARAMS,
       async execute() {
         throw new Error(CONFIG_HINT);
@@ -156,24 +156,24 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     }
   }
 
-  // ── python_repl ─────────────────────────────────────────────────────────
+  // ── jupyter_repl ─────────────────────────────────────────────────────────
 
-  pi.registerTool<typeof PYTHON_PARAMS, unknown, InCallState>({
-    name: "python_repl",
-    label: "Python REPL",
+  pi.registerTool<typeof JUPYTER_PARAMS, unknown, InCallState>({
+    name: "jupyter_repl",
+    label: "Jupyter REPL",
     description:
-      "Execute Python in a persistent REPL on a remote Jupyter Server. Backed by a real IPython kernel. Variables, imports, and state stick around between calls. The last expression is the result; use print() or display() for intermediate output. Images (matplotlib, PIL) are returned inline.",
+      "Execute code in a persistent REPL on a remote Jupyter Server. Backed by a real Jupyter kernel (e.g. python3, or ir for R). Variables, imports, and state stick around between calls. The last expression is the result; use print() for intermediate output. Images are returned inline.",
     promptSnippet:
-      "python_repl: run Python on a remote Jupyter kernel (variables and imports persist; returns stdout + last expression + images).",
+      "jupyter_repl: run code on a remote Jupyter kernel (variables and imports persist; returns stdout + last expression + images).",
     promptGuidelines: [
-      "Use `python_repl` for data analysis, plotting, and multi-step workflows. State persists between calls in a real remote IPython kernel.",
+      "Use `jupyter_repl` for data analysis, plotting, and multi-step workflows. State persists between calls in a real remote Jupyter kernel.",
       "Variables and imports stick around. No need to re-import or redefine on every turn unless the user has reset the session.",
       "The last expression is the result; use print() or display() for intermediate output.",
       "Images (matplotlib, PIL) come back inline. The user sees them if their terminal supports graphics.",
       "Pass `dependencies` on the first call to pre-install packages before the kernel starts.",
-      "Use `python_add_dependencies` to install packages mid-session without restarting the kernel.",
+      "Use `jupyter_add_dependencies` to install packages mid-session without restarting the kernel.",
     ],
-    parameters: PYTHON_PARAMS,
+    parameters: JUPYTER_PARAMS,
 
     renderCall(args, theme, _context) {
       const text =
@@ -251,7 +251,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       return text;
     },
 
-    async execute(_toolCallId, params: PythonParams, signal, onUpdate, ctx) {
+    async execute(_toolCallId, params: JupyterParams, signal, onUpdate, ctx) {
       if (signal?.aborted) throw new Error("aborted");
       const sess = await ensureSession(params.dependencies ?? [], ctx.cwd);
       const timeoutSecs = Math.max(1, params.timeout_secs ?? 120);
@@ -289,15 +289,15 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     },
   });
 
-  // ── python_add_dependencies ─────────────────────────────────────────────
+  // ── jupyter_add_dependencies ─────────────────────────────────────────────
 
   pi.registerTool<typeof ADD_DEPENDENCIES_PARAMS, { notebook_id?: string; packages?: string[] }>({
-    name: "python_add_dependencies",
+    name: "jupyter_add_dependencies",
     label: "Add Dependencies",
     description:
       "Install packages into the remote kernel's environment without restarting. Python kernels use %pip (pip-style specs like 'matplotlib', 'numpy>=2'); R kernels use install.packages (CRAN names like 'ggplot2'). Reports the real error when installation fails.",
     promptSnippet:
-      "python_add_dependencies: install packages into the remote kernel session (no restart needed).",
+      "jupyter_add_dependencies: install packages into the remote kernel session (no restart needed).",
     parameters: ADD_DEPENDENCIES_PARAMS,
     async execute(_toolCallId, params: AddDependenciesParams, signal) {
       if (signal?.aborted) throw new Error("aborted");
@@ -332,14 +332,14 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     },
   });
 
-  // ── python_save_notebook ────────────────────────────────────────────────
+  // ── jupyter_save_notebook ────────────────────────────────────────────────
 
   pi.registerTool<typeof SAVE_NOTEBOOK_PARAMS, { notebook_id: string; path?: string }>({
-    name: "python_save_notebook",
+    name: "jupyter_save_notebook",
     label: "Save Notebook",
     description:
       "Save the current session as an .ipynb file (openable in Jupyter / VSCode). Prefer an absolute path or ~/ — relative paths resolve against the current working directory, not the pi process directory.",
-    promptSnippet: "python_save_notebook: save the current session as an .ipynb file.",
+    promptSnippet: "jupyter_save_notebook: save the current session as an .ipynb file.",
     parameters: SAVE_NOTEBOOK_PARAMS,
     async execute(_toolCallId, params: SaveNotebookParams, signal, _onUpdate, ctx) {
       if (signal?.aborted) throw new Error("aborted");
@@ -358,11 +358,11 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     },
   });
 
-  // ── /python-reset ───────────────────────────────────────────────────────
+  // ── /jupyter-reset ───────────────────────────────────────────────────────
 
-  pi.registerCommand("python-reset", {
+  pi.registerCommand("jupyter-reset", {
     description:
-      "Start fresh: next python_repl call opens a new remote kernel (clean slate, no prior variables or imports)",
+      "Start fresh: next jupyter_repl call opens a new remote kernel (clean slate, no prior variables or imports)",
     handler: async (_args, ctx) => {
       const old = session;
       session = null;
@@ -375,7 +375,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
         }
       }
       ctx.ui.notify(
-        "Python session closed. Next python_repl call will start a fresh remote kernel.",
+        "Kernel session closed. Next jupyter_repl call will start a fresh remote kernel.",
         "info",
       );
     },

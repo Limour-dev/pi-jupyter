@@ -1,6 +1,6 @@
 # pi-jupyter v2
 
-Run Python on a **remote Jupyter Server** from inside the pi coding agent.
+Run code (Python, R, …) on a **remote Jupyter Server** from inside the pi coding agent.
 Pure TypeScript, no local backend — the remote server *is* the backend.
 
 This is a ground-up refactor of v1 around a hexagonal (ports & adapters)
@@ -9,10 +9,10 @@ rationale and the lessons carried over from v1.
 
 ## Features
 
-- `python_repl` — persistent remote IPython kernel; state survives between calls
-- `python_add_dependencies` — hot-install packages via `%pip` (no restart)
-- `python_save_notebook` — export the session as a valid `.ipynb`
-- `/python-reset` — drop the kernel and start clean
+- `jupyter_repl` — persistent remote Jupyter kernel; state survives between calls
+- `jupyter_add_dependencies` — hot-install packages (`%pip` / `install.packages`, no restart)
+- `jupyter_save_notebook` — export the session as a valid `.ipynb`
+- `/jupyter-reset` — drop the kernel and start clean
 - Inline matplotlib/PIL images returned to the model
 - Streaming output, execution-timeout interrupt, no orphan kernels on exit
 
@@ -72,7 +72,7 @@ R example (`~/.pi-jupyter/config.json`):
 
 Language-specific behavior:
 
-- `python_add_dependencies` maps to `%pip install` for Python kernels and to
+- `jupyter_add_dependencies` maps to `%pip install` for Python kernels and to
   `install.packages(..., repos = "https://cloud.r-project.org")` (CRAN names)
   for R kernels; unsupported languages fail with an explicit error. Failed
   installs are reported, never silently treated as success.

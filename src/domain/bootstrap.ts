@@ -50,7 +50,7 @@ export function parseMissingPackages(stdoutText: string): string[] {
       const parsed = JSON.parse(lines[i]) as { missing?: string[] };
       if (Array.isArray(parsed.missing) && parsed.missing.length > 0) {
         return [
-          `missing packages in remote kernel: ${parsed.missing.join(", ")} — use python_add_dependencies`,
+          `missing packages in remote kernel: ${parsed.missing.join(", ")} — use jupyter_add_dependencies`,
         ];
       }
       return [];
