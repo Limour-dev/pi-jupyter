@@ -329,7 +329,13 @@ export class RemoteSession implements Session {
     if (probe) {
       const outcome = await kernel.execute(probe, {
         timeoutMs: Math.min(30_000, this.config.installTimeoutMs),
-        silent: true,
+        // BUG-9: must be silent:false — the probe reports reachability via cat()
+        // stdout on iopub, which a silent execution suppresses (→ empty stdout →
+        // false 'unreachable', even when the repo is perfectly reachable).
+        // storeHistory:false keeps the probe out of kernel history and avoids
+        // consuming an execution_count.
+        silent: false,
+        storeHistory: false,
       });
       const stdout = outcome.outputs
         .filter((o) => o.outputType === "stream" && o.text)

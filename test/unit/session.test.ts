@@ -298,6 +298,29 @@ describe("RemoteSession — bug fixes", () => {
     expect(codes.some((c) => c.includes("install.packages") && c.includes('"ggplot2"'))).toBe(true);
   });
 
+  it("R reachability probe runs non-silent so its cat() stdout survives (BUG-9)", async () => {
+    const s = new RemoteSession(server, CONFIG_R);
+    await s.initialize();
+    kernel.execute.mockClear();
+    kernel.execute.mockResolvedValueOnce({
+      outputs: [{ outputType: "stream", name: "stdout", text: "TRUE" }],
+      status: "ok" as const,
+      executionCount: undefined,
+    });
+    await s.addDependencies(["ggplot2"]);
+    await s.syncEnvironment();
+    const probeCall = kernel.execute.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].includes("cat(isTRUE"),
+    );
+    expect(probeCall, "probe execute call not found").toBeDefined();
+    const opts = probeCall![1] as ExecuteOptions;
+    // silent:true suppresses the cat() stream on iopub -> empty stdout -> a false
+    // 'unreachable' verdict even when the repo is reachable. storeHistory:false
+    // keeps the probe out of kernel history / execution_count.
+    expect(opts.silent).toBe(false);
+    expect(opts.storeHistory).toBe(false);
+  });
+
   it("unsupported kernel language refuses hot-install", async () => {
     server.listKernelSpecs.mockResolvedValue({
       default: "julia",

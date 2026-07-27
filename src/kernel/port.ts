@@ -11,6 +11,14 @@ import type { JsOutput } from "../domain/types";
 export type ExecuteOptions = {
   timeoutMs?: number;
   silent?: boolean;
+  /**
+   * Override `store_history` independently of `silent`. Defaults to `!silent`.
+   * Needed by the R repo-reachability probe (BUG-9): the probe must run with
+   * `silent: false` so its `cat()` stdout reaches iopub (silent executions have
+   * their stream output suppressed by the kernel), yet `store_history: false` so
+   * it neither consumes an execution_count nor pollutes kernel history.
+   */
+  storeHistory?: boolean;
   /** Called with the accumulated outputs after each iopub message. */
   onUpdate?: (outputs: JsOutput[]) => void;
 };

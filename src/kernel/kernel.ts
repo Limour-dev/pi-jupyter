@@ -38,7 +38,7 @@ export class JupyterKernel implements KernelPort {
     const future = this.kernel.requestExecute({
       code,
       silent,
-      store_history: !silent,
+      store_history: opts.storeHistory ?? !silent,
       user_expressions: {},
       allow_stdin: false,
       stop_on_error: true,
