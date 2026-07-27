@@ -1,0 +1,5 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.ipynb_checkpoints/
+*.ipynb
