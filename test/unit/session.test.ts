@@ -21,6 +21,19 @@ const CONFIG: ShimConfig = {
   tlsInsecure: false,
   defaultTimeoutMs: 1000,
   installTimeoutMs: 1000,
+  workingDir: "/tmp",
+  timeoutRestartKernel: false,
+};
+
+/** CONFIG with an R kernelspec selected. */
+const CONFIG_R: ShimConfig = { ...CONFIG, kernelName: "ir" };
+
+const SPECS = {
+  default: "python3",
+  specs: [
+    { name: "python3", displayName: "Python 3", language: "python" },
+    { name: "ir", displayName: "R", language: "r" },
+  ],
 };
 
 function makeKernelPort(): KernelPort & { execute: ReturnType<typeof vi.fn> } {
@@ -36,13 +49,20 @@ function makeKernelPort(): KernelPort & { execute: ReturnType<typeof vi.fn> } {
     dispose: vi.fn(),
     isDisposed: false,
     connectionStatus: "connected",
+    status: "idle",
     waitConnected: vi.fn().mockResolvedValue(undefined),
+    waitIdle: vi.fn().mockResolvedValue(true),
   };
 }
 
-function makeServerPort(kernel: KernelPort): ServerPort & { ping: ReturnType<typeof vi.fn> } {
+function makeServerPort(kernel: KernelPort): ServerPort & {
+  ping: ReturnType<typeof vi.fn>;
+  listKernelSpecs: ReturnType<typeof vi.fn>;
+  startKernel: ReturnType<typeof vi.fn>;
+} {
   return {
     ping: vi.fn().mockResolvedValue(undefined),
+    listKernelSpecs: vi.fn().mockResolvedValue(SPECS),
     startKernel: vi.fn().mockResolvedValue(kernel),
     dispose: vi.fn(),
   };
@@ -189,5 +209,132 @@ describe("RemoteSession", () => {
     expect((await s.getRuntimeStatus())?.lifecycle).toBe("running");
     await s.close();
     expect((await s.getRuntimeStatus())?.lifecycle).toBe("stopped");
+  });
+});
+
+describe("RemoteSession — bug fixes", () => {
+  let kernel: ReturnType<typeof makeKernelPort>;
+  let server: ReturnType<typeof makeServerPort>;
+
+  beforeEach(() => {
+    kernel = makeKernelPort();
+    server = makeServerPort(kernel);
+  });
+
+  // ── BUG-1: install failures must surface, R uses install.packages ──
+
+  it("install failure (error status) rejects syncEnvironment, not silent success", async () => {
+    kernel.execute.mockImplementation(async (code: string) => {
+      if (code.includes("%pip")) {
+        return {
+          outputs: [
+            { outputType: "error", ename: "CalledProcessError", evalue: "pip failed" },
+          ],
+          status: "error" as const,
+          executionCount: 1,
+        };
+      }
+      return { outputs: [], status: "ok" as const, executionCount: undefined };
+    });
+    const s = new RemoteSession(server, CONFIG);
+    await s.initialize();
+    await s.addDependencies(["does-not-exist"]);
+    await expect(s.syncEnvironment()).rejects.toThrow(/failed to install/);
+  });
+
+  it("R kernel installs via install.packages, not %pip", async () => {
+    const s = new RemoteSession(server, CONFIG_R);
+    await s.initialize();
+    kernel.execute.mockClear();
+    await s.addDependencies(["ggplot2"]);
+    await s.syncEnvironment();
+    const code = kernel.execute.mock.calls[0][0] as string;
+    expect(code).toContain("install.packages");
+    expect(code).toContain('"ggplot2"');
+    expect(code).not.toContain("%pip");
+  });
+
+  it("unsupported kernel language refuses hot-install", async () => {
+    server.listKernelSpecs.mockResolvedValue({
+      default: "julia",
+      specs: [{ name: "julia", displayName: "Julia", language: "julia" }],
+    });
+    const s = new RemoteSession(server, { ...CONFIG, kernelName: "julia" });
+    await s.initialize();
+    await s.addDependencies(["Foo"]);
+    await expect(s.syncEnvironment()).rejects.toThrow(/unsupported language/);
+  });
+
+  // ── BUG-2: notebook metadata reflects the real kernelspec ──
+
+  it("R session saves an .ipynb with an R kernelspec header", async () => {
+    const s = new RemoteSession(server, CONFIG_R, { notebookId: "nb-r" });
+    await s.initialize();
+    const path = join(tmpdir(), `pi-jupyter-r-${Date.now()}.ipynb`);
+    const written = await s.saveNotebook(path);
+    expect(written).toBe(path);
+    const nb = JSON.parse(readFileSync(path, "utf-8"));
+    expect(nb.metadata.kernelspec.name).toBe("ir");
+    expect(nb.metadata.kernelspec.display_name).toBe("R");
+    expect(nb.metadata.kernelspec.language).toBe("r");
+    expect(nb.metadata.language_info.name).toBe("r");
+    rmSync(path, { force: true });
+  });
+
+  // ── BUG-4: python-only bootstrap / probe ──
+
+  it("R kernel skips the python bootstrap and package probe", async () => {
+    const s = new RemoteSession(server, CONFIG_R);
+    await s.initialize();
+    const codes = kernel.execute.mock.calls.map((c) => c[0] as string);
+    expect(codes.some((c) => c.includes("matplotlib"))).toBe(false);
+    expect(codes.some((c) => c.includes('"missing"'))).toBe(false);
+  });
+
+  it("python kernel still runs the bootstrap and probe", async () => {
+    const s = new RemoteSession(server, CONFIG);
+    await s.initialize();
+    const codes = kernel.execute.mock.calls.map((c) => c[0] as string);
+    expect(codes.some((c) => c.includes("matplotlib"))).toBe(true);
+  });
+
+  // ── BUG-6: busy kernel after timeout ──
+
+  it("runCell on a still-busy kernel fails fast with a clear error", async () => {
+    const s = new RemoteSession(server, CONFIG);
+    await s.initialize();
+    (kernel as { status: string }).status = "busy";
+    const r = await s.runCell("1+1");
+    expect(r.status).toBe("error");
+    expect(r.success).toBe(false);
+    expect(r.outputs?.[0].evalue).toMatch(/still busy/);
+  });
+
+  it("timeoutRestartKernel policy restarts a busy kernel and recovers", async () => {
+    const s = new RemoteSession(server, { ...CONFIG, timeoutRestartKernel: true });
+    await s.initialize();
+    expect(server.startKernel).toHaveBeenCalledTimes(1);
+    (kernel as { status: string }).status = "busy";
+    const r = await s.runCell("1+1");
+    expect(server.startKernel).toHaveBeenCalledTimes(2);
+    expect(r.status).toBe("done");
+    expect(r.success).toBe(true);
+  });
+
+  // ── UX-7: kernelName validation ──
+
+  it("rejects an unknown kernelName with the list of available kernels", async () => {
+    const s = new RemoteSession(server, { ...CONFIG, kernelName: "R" });
+    await expect(s.initialize()).rejects.toThrow(/not found on the Jupyter server/);
+    await expect(
+      new RemoteSession(server, { ...CONFIG, kernelName: "R" }).initialize(),
+    ).rejects.toThrow(/ir \(R\)/);
+  });
+
+  it("degrades gracefully when the server cannot list kernelspecs", async () => {
+    server.listKernelSpecs.mockRejectedValue(new Error("403"));
+    const s = new RemoteSession(server, CONFIG);
+    await expect(s.initialize()).resolves.toBeUndefined();
+    expect(server.startKernel).toHaveBeenCalledWith("python3");
   });
 });

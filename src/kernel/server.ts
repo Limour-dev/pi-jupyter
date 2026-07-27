@@ -16,7 +16,7 @@ import { KernelManager, ServerConnection } from "@jupyterlab/services";
 import { createRequire } from "node:module";
 import type { ShimConfig } from "../config";
 import { JupyterKernel } from "./kernel";
-import type { KernelPort, ServerPort } from "./port";
+import type { KernelPort, KernelSpecInfo, KernelSpecList, ServerPort } from "./port";
 
 export class JupyterServer implements ServerPort {
   readonly settings: ServerConnection.ISettings;
@@ -57,6 +57,33 @@ export class JupyterServer implements ServerPort {
     }
   }
 
+  async listKernelSpecs(): Promise<KernelSpecList> {
+    const res = await ServerConnection.makeRequest(
+      `${this.settings.baseUrl}api/kernelspecs`,
+      { method: "GET" },
+      this.settings,
+    );
+    if (!res.ok) {
+      throw new Error(
+        `[pi-jupyter] could not list kernelspecs: HTTP ${res.status} ${res.statusText}`,
+      );
+    }
+    const body = (await res.json()) as {
+      default?: string;
+      kernelspecs?: Record<
+        string,
+        { name?: string; spec?: { display_name?: string; language?: string } } | undefined
+      >;
+    };
+    const specs: KernelSpecInfo[] = Object.entries(body.kernelspecs ?? {}).map(
+      ([name, ks]) => ({
+        name: ks?.name ?? name,
+        displayName: ks?.spec?.display_name ?? name,
+        language: (ks?.spec?.language ?? "unknown").toLowerCase(),
+      }),
+    );
+    return { default: body.default ?? "", specs };
+  }
   async startKernel(name: string): Promise<KernelPort> {
     const connection = await this.kernels.startNew({ name });
     return new JupyterKernel(connection);

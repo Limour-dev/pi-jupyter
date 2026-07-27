@@ -92,7 +92,8 @@ export interface Session {
   runCell(code: string, opts?: RunCellOpts): Promise<CellResult>;
   addDependencies(packages: string[]): Promise<void>;
   syncEnvironment(): Promise<void>;
-  saveNotebook(path?: string): Promise<void>;
+  /** Write the session to an .ipynb; resolves to the path written. */
+  saveNotebook(path?: string): Promise<string>;
   shutdown(): Promise<void>;
   close(): Promise<void>;
   getRuntimeStatus(): Promise<RuntimeStatus | undefined>;

@@ -57,16 +57,28 @@ function makeMockKernel(scenario: Scenario) {
     }),
   };
 
-  return {
+  // Minimal status / statusChanged support so waitIdle() can settle (BUG-6).
+  const statusHandlers = new Set<(k: unknown, status: string) => void>();
+  const mock: any = {
     requestExecute: vi.fn(() => future),
-    interrupt: vi.fn().mockResolvedValue(undefined),
+    interrupt: vi.fn().mockImplementation(async () => {
+      // An interruptible kernel returns to idle right after SIGINT.
+      mock.status = "idle";
+      for (const h of statusHandlers) h(mock, "idle");
+    }),
     shutdown: vi.fn().mockResolvedValue(undefined),
     dispose: vi.fn(),
     isDisposed: false,
     connectionStatus: "connected",
+    status: "idle",
     connectionStatusChanged: { connect: vi.fn(), disconnect: vi.fn() },
+    statusChanged: {
+      connect: (h: (k: unknown, status: string) => void) => statusHandlers.add(h),
+      disconnect: (h: (k: unknown, status: string) => void) => statusHandlers.delete(h),
+    },
     _future: future,
   };
+  return mock;
 }
 
 const dataOf = (o: JsOutput) => JSON.parse(o.dataJson ?? "{}");

@@ -40,6 +40,57 @@ Optional config file: `~/.pi-jupyter/config.json`
 | `JUPYTER_REMOTE_TLS_INSECURE` | off | Skip TLS validation (dev only) |
 | `JUPYTER_REMOTE_TIMEOUT_MS` | `300000` | Per-cell timeout |
 | `JUPYTER_INSTALL_TIMEOUT_MS` | `600000` | `%pip` install timeout |
+| `JUPYTER_WORKING_DIR` | process cwd | Base dir for relative `save_notebook` paths |
+| `JUPYTER_TIMEOUT_RESTART_KERNEL` | off | Restart a kernel still busy after a timeout (state lost) |
+
+## Multiple languages (R and others)
+
+The extension is language-aware: the selected kernel's kernelspec drives the
+install command, the bootstrap code, and the metadata of saved notebooks.
+
+`kernelName` must be a kernelspec **name**, not a display name — e.g. `ir`,
+not `R`. List the specs on your server:
+
+```bash
+curl -s -H "Authorization: token YOUR-TOKEN" \
+  http://192.168.105.1:57002/api/kernelspecs \
+  | jq '.kernelspecs | to_entries[] | {name: .key, display: .value.spec.display_name, language: .value.spec.language}'
+```
+
+If `kernelName` matches no spec, initialization fails with the full list of
+available kernels grouped by language.
+
+R example (`~/.pi-jupyter/config.json`):
+
+```json
+{
+  "url": "http://192.168.105.1:57002",
+  "token": "your-token-here",
+  "kernelName": "ir"
+}
+```
+
+Language-specific behavior:
+
+- `python_add_dependencies` maps to `%pip install` for Python kernels and to
+  `install.packages(..., repos = "https://cloud.r-project.org")` (CRAN names)
+  for R kernels; unsupported languages fail with an explicit error. Failed
+  installs are reported, never silently treated as success.
+- Saved `.ipynb` files declare the real kernelspec (e.g. `ir` / `r`), so
+  Jupyter and VSCode open them with the correct kernel.
+- The matplotlib inline bootstrap and the missing-package probe run only on
+  Python kernels.
+- Timeouts interrupt the kernel, but SIGINT is best-effort: a kernel that
+  ignores it (e.g. R inside a long C loop) stays busy. The next call then
+  fails fast with a clear `kernel still busy` error instead of silently
+  queueing; set `JUPYTER_TIMEOUT_RESTART_KERNEL=1` (or `"timeoutRestartKernel":
+  true`) to auto-restart instead — in-memory state will be lost.
+
+Troubleshooting:
+
+- `kernel "R" not found` — use the spec name (`ir`), not the display name.
+- Save paths: relative paths resolve against the pi working directory; prefer
+  absolute paths or `~/`, or set `JUPYTER_WORKING_DIR`.
 
 ## Development
 

@@ -19,6 +19,8 @@ import type { ExecuteOptions, ExecuteOutcome, KernelPort } from "./port";
 
 const DEFAULT_TIMEOUT_MS = 300_000;
 const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
+/** Grace period for a timed-out kernel to settle back to idle (BUG-6). */
+const TIMEOUT_SETTLE_MS = 5_000;
 
 export class JupyterKernel implements KernelPort {
   constructor(private kernel: Kernel.IKernelConnection) {}
@@ -69,6 +71,15 @@ export class JupyterKernel implements KernelPort {
 
     try {
       await raceTimeout(future.done, timeoutMs);
+    } catch (err) {
+      if (err instanceof TimeoutError) {
+        // The interrupt has already been fired, but some kernels (e.g. R in a
+        // long C loop) ignore SIGINT and stay busy. Give the kernel a bounded
+        // grace period to settle back to idle so the NEXT requestExecute does
+        // not silently queue behind leftover computation (BUG-6).
+        await this.waitIdle(TIMEOUT_SETTLE_MS);
+      }
+      throw err;
     } finally {
       clearTimeout(timer);
       future.dispose();
@@ -103,6 +114,43 @@ export class JupyterKernel implements KernelPort {
 
   get connectionStatus(): string {
     return this.kernel.connectionStatus;
+  }
+
+  get status(): string {
+    return this.kernel.status;
+  }
+
+  /**
+   * Wait for the execution state to reach "idle" (BUG-6).
+   *
+   * Resolves `true` as soon as the kernel is idle, `false` if the deadline
+   * passes first. lumino v2 note: keep the handler reference and disconnect
+   * it explicitly (same as `waitConnected`).
+   */
+  waitIdle(timeoutMs: number = DEFAULT_CONNECT_TIMEOUT_MS): Promise<boolean> {
+    if (this.kernel.isDisposed || this.kernel.status === "idle") {
+      return Promise.resolve(true);
+    }
+    return new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        this.kernel.statusChanged.disconnect(handler);
+        resolve(false);
+      }, timeoutMs);
+      const handler = (_k: Kernel.IKernelConnection, status: KernelMessage.Status) => {
+        if (status === "idle") {
+          clearTimeout(timer);
+          this.kernel.statusChanged.disconnect(handler);
+          resolve(true);
+        }
+      };
+      this.kernel.statusChanged.connect(handler);
+      // Re-check: it may have gone idle between the guard above and connect().
+      if (this.kernel.status === "idle") {
+        clearTimeout(timer);
+        this.kernel.statusChanged.disconnect(handler);
+        resolve(true);
+      }
+    });
   }
 
   /**

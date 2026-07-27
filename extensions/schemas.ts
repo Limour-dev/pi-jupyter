@@ -13,7 +13,7 @@ export const PYTHON_PARAMS = Type.Object({
   dependencies: Type.Optional(
     Type.Array(Type.String(), {
       description:
-        "Packages to add before executing this code. On the first call they are recorded before the kernel starts; on later calls they are hot-installed via %pip.",
+        "Packages to add before executing this code. On the first call they are recorded before the kernel starts; on later calls they are hot-installed into the kernel (pip-style specs for Python, CRAN names for R).",
     }),
   ),
   timeout_secs: Type.Optional(
@@ -34,7 +34,7 @@ export const SAVE_NOTEBOOK_PARAMS = Type.Object({
   path: Type.Optional(
     Type.String({
       description:
-        "File path to save to (e.g. './analysis.ipynb'). If omitted, saves to <notebook-id>.ipynb in the current directory.",
+        "File path to save to (e.g. './analysis.ipynb'). Prefer an absolute path or ~/; relative paths resolve against the current working directory. If omitted, saves to <notebook-id>.ipynb in the working directory.",
     }),
   ),
 });

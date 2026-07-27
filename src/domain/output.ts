@@ -92,3 +92,9 @@ export function dedupeImages(outputs: JsOutput[]): JsOutput[] {
 export function isRasterImage(mime: string): boolean {
   return mime.startsWith("image/") && mime !== "image/svg+xml";
 }
+
+/** Strip ANSI escape sequences (kernel tracebacks carry color codes). */
+export function stripAnsi(s: string): string {
+  const esc = String.fromCharCode(27);
+  return s.replace(new RegExp(`${esc}\\[[0-9;]*[A-Za-z]`, "g"), "");
+}

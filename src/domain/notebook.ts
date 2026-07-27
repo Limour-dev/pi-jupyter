@@ -13,14 +13,49 @@ export type CellRecord = {
   result: CellResult;
 };
 
-/** Build a nbformat 4.5 compatible notebook object (pure JSON). */
-export function buildNotebook(cells: CellRecord[]): Record<string, unknown> {
+/**
+ * Kernel/language metadata for the notebook header.
+ *
+ * Sourced from the running kernel's kernelspec (see `session.ts`), so a
+ * notebook saved from an R kernel declares an R kernelspec — not a hard-coded
+ * Python one (BUG-2).
+ */
+export type NotebookMeta = {
+  /** kernelspec name, e.g. "python3" or "ir". */
+  kernelName: string;
+  /** kernelspec display name, e.g. "Python 3" or "R". */
+  displayName: string;
+  /** language, e.g. "python" or "r". */
+  language: string;
+};
+
+const DEFAULT_META: NotebookMeta = {
+  kernelName: "python3",
+  displayName: "Python 3",
+  language: "python",
+};
+
+/**
+ * Build a nbformat 4.5 compatible notebook object (pure JSON).
+ *
+ * `meta` supplies the kernelspec / language_info header; it defaults to a
+ * Python kernelspec for backwards compatibility, but callers should pass the
+ * real kernelspec so the notebook opens with the correct kernel.
+ */
+export function buildNotebook(
+  cells: CellRecord[],
+  meta: NotebookMeta = DEFAULT_META,
+): Record<string, unknown> {
   return {
     nbformat: 4,
     nbformat_minor: 5,
     metadata: {
-      kernelspec: { display_name: "Python 3", language: "python", name: "python3" },
-      language_info: { name: "python" },
+      kernelspec: {
+        display_name: meta.displayName,
+        language: meta.language,
+        name: meta.kernelName,
+      },
+      language_info: { name: meta.language },
     },
     cells: cells.map((entry, idx) => ({
       cell_type: "code",

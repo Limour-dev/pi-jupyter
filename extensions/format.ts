@@ -6,13 +6,10 @@
  * `repl.ts` so it can be unit-tested without a live ExtensionAPI.
  */
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
+import { stripAnsi } from "../src/domain/output";
 import type { CellResult } from "../src/domain/types";
 
-/** Strip ANSI escape sequences (tracebacks carry color codes). */
-export function stripAnsi(s: string): string {
-  const esc = String.fromCharCode(27);
-  return s.replace(new RegExp(`${esc}\\[[0-9;]*[A-Za-z]`, "g"), "");
-}
+export { stripAnsi };
 
 /**
  * Convert a CellResult into pi message content (text + inline images).
@@ -64,10 +61,14 @@ export function formatResult(result: CellResult): {
           textChunks.push(String(textRep));
         }
         // Attach raster images inline so the model can see them.
+        // Attach raster images inline so the model can see them.  When a
+        // bundle carries both png and jpeg it is the same figure twice —
+        // keep png only (BUG-5).
+        const hasPng = data["image/png"]?.type === "binary";
         for (const [mime, entry] of Object.entries(data)) {
           if (!mime.startsWith("image/")) continue;
           if (mime === "image/svg+xml") continue;
-          if (entry?.type !== "binary" || typeof entry.value !== "string") continue;
+          if (hasPng && mime === "image/jpeg") continue;
           // Dedupe (Jupyter often sends the same image twice).
           const dup = parts.some(
             (p) =>

@@ -13,8 +13,11 @@
  * Config (env vars):
  *   JUPYTER_REMOTE_URL    e.g. http://192.168.105.1:57002
  *   JUPYTER_REMOTE_TOKEN  e.g. 123456
- *   JUPYTER_KERNEL_NAME   default "python3"
- *
+ *   JUPYTER_KERNEL_NAME   default "python3" (must be a kernelspec *name*,
+ *                         e.g. "ir" for R — not the display name "R")
+ *   JUPYTER_WORKING_DIR   base dir for relative save_notebook paths
+ *   JUPYTER_TIMEOUT_RESTART_KERNEL=1  auto-restart a kernel still busy after
+ *                                     a timeout (state lost)
  * After editing, run `/reload` in pi.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -22,7 +25,7 @@ import { highlightCode } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
 import path from "node:path";
-import { isConfigured, loadConfig } from "../src/config";
+import { CONFIG_HINT, isConfigured, loadConfig } from "../src/config";
 import type { Session } from "../src/domain/types";
 import { JupyterServer } from "../src/kernel/server";
 import { RemoteSession } from "../src/session";
@@ -62,22 +65,45 @@ function expandHome(userPath: string): string {
 
 // ── extension ───────────────────────────────────────────────────────────────
 
-const CONFIG_HINT =
-  "Remote Jupyter is not configured. Set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN.";
-
 export default function piJupyterExtension(pi: ExtensionAPI) {
   if (!isConfigured()) {
     pi.on("session_start", async (_event, ctx) => {
       ctx.ui.notify(CONFIG_HINT, "warning");
     });
+    // Register every tool even when unconfigured, so the tool list is stable
+    // before/after configuration; each stub fails with the same hint (UX-8).
     pi.registerTool({
       name: "python_repl",
       label: "Python REPL",
       description:
-        "Execute Python on a remote Jupyter Server. Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN.",
+        "Execute code in a persistent REPL on a remote Jupyter Server. Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
       promptSnippet:
-        "python_repl: requires JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN to be set.",
+        "python_repl: run code on a remote Jupyter kernel (not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN, or ~/.pi-jupyter/config.json).",
       parameters: PYTHON_PARAMS,
+      async execute() {
+        throw new Error(CONFIG_HINT);
+      },
+    });
+    pi.registerTool({
+      name: "python_add_dependencies",
+      label: "Add Dependencies",
+      description:
+        "Install packages into the remote kernel's environment. Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
+      promptSnippet:
+        "python_add_dependencies: not configured (set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN, or ~/.pi-jupyter/config.json).",
+      parameters: ADD_DEPENDENCIES_PARAMS,
+      async execute() {
+        throw new Error(CONFIG_HINT);
+      },
+    });
+    pi.registerTool({
+      name: "python_save_notebook",
+      label: "Save Notebook",
+      description:
+        "Save the current session as an .ipynb file. Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
+      promptSnippet:
+        "python_save_notebook: not configured (set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN, or ~/.pi-jupyter/config.json).",
+      parameters: SAVE_NOTEBOOK_PARAMS,
       async execute() {
         throw new Error(CONFIG_HINT);
       },
@@ -98,7 +124,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     await sess.syncEnvironment();
   }
 
-  async function ensureSession(initialDeps: string[] = []): Promise<Session> {
+  async function ensureSession(initialDeps: string[] = [], cwd?: string): Promise<Session> {
     const deps = [...new Set(initialDeps.map((p) => p.trim()).filter(Boolean))];
     if (session) {
       await addDepsAndSync(session, deps);
@@ -113,10 +139,10 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       const config = loadConfig();
       const server = new JupyterServer(config);
       const sess = new RemoteSession(server, config, {
-        runtime: "python",
-        workingDir: process.cwd(),
+        runtime: "jupyter",
+        workingDir: cwd ?? config.workingDir,
         peerLabel: "pi",
-        description: "pi remote Python REPL",
+        description: "pi remote Jupyter REPL",
         dependencies: deps,
       });
       await sess.initialize();
@@ -225,9 +251,9 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       return text;
     },
 
-    async execute(_toolCallId, params: PythonParams, signal, onUpdate) {
+    async execute(_toolCallId, params: PythonParams, signal, onUpdate, ctx) {
       if (signal?.aborted) throw new Error("aborted");
-      const sess = await ensureSession(params.dependencies ?? []);
+      const sess = await ensureSession(params.dependencies ?? [], ctx.cwd);
       const timeoutSecs = Math.max(1, params.timeout_secs ?? 120);
       const result = await sess.runCell(params.code, {
         timeoutMs: Math.round(timeoutSecs * 1000),
@@ -269,9 +295,9 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "python_add_dependencies",
     label: "Add Dependencies",
     description:
-      "Install packages into the remote kernel's environment without restarting. Accepts pip-style specs like 'matplotlib', 'numpy>=2', 'requests'. Uses %pip so packages land in the kernel's own environment.",
+      "Install packages into the remote kernel's environment without restarting. Python kernels use %pip (pip-style specs like 'matplotlib', 'numpy>=2'); R kernels use install.packages (CRAN names like 'ggplot2'). Reports the real error when installation fails.",
     promptSnippet:
-      "python_add_dependencies: install packages into the remote Python session (no restart needed).",
+      "python_add_dependencies: install packages into the remote kernel session (no restart needed).",
     parameters: ADD_DEPENDENCIES_PARAMS,
     async execute(_toolCallId, params: AddDependenciesParams, signal) {
       if (signal?.aborted) throw new Error("aborted");
@@ -279,7 +305,21 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
         return { content: [{ type: "text", text: "No packages given." }], details: {} };
       }
       const sess = await ensureSession();
-      await addDepsAndSync(sess, params.packages);
+      try {
+        await addDepsAndSync(sess, params.packages);
+      } catch (err) {
+        // Surface the REAL failure (wrong language, network, CRAN error, …)
+        // instead of pretending the install succeeded (BUG-1).
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Failed to install into ${sess.notebookId}: ${(err as Error).message}`,
+            },
+          ],
+          details: { notebook_id: sess.notebookId, packages: params.packages },
+        };
+      }
       return {
         content: [
           {
@@ -298,18 +338,22 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "python_save_notebook",
     label: "Save Notebook",
     description:
-      "Save the current session as an .ipynb file (openable in Jupyter / VSCode). If no path is given, saves to <notebook-id>.ipynb in the current directory.",
+      "Save the current session as an .ipynb file (openable in Jupyter / VSCode). Prefer an absolute path or ~/ — relative paths resolve against the current working directory, not the pi process directory.",
     promptSnippet: "python_save_notebook: save the current session as an .ipynb file.",
     parameters: SAVE_NOTEBOOK_PARAMS,
-    async execute(_toolCallId, params: SaveNotebookParams, signal) {
+    async execute(_toolCallId, params: SaveNotebookParams, signal, _onUpdate, ctx) {
       if (signal?.aborted) throw new Error("aborted");
       const sess = await ensureSession();
-      const savePath = params.path ? resolvePath(params.path) : undefined;
-      await sess.saveNotebook(savePath);
-      const where = savePath ?? `${sess.notebookId}.ipynb`;
+      // Resolve relative paths against the pi working directory (ctx.cwd), NOT
+      // the pi *process* cwd — under npx those are different places (BUG-3).
+      const base = ctx?.cwd ?? process.cwd();
+      const savePath = params.path
+        ? resolvePath(params.path, base)
+        : path.resolve(base, `${sess.notebookId}.ipynb`);
+      const where = await sess.saveNotebook(savePath);
       return {
         content: [{ type: "text", text: `Notebook saved to ${where}` }],
-        details: { notebook_id: sess.notebookId, path: savePath },
+        details: { notebook_id: sess.notebookId, path: where },
       };
     },
   });

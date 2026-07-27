@@ -12,7 +12,8 @@ import { dirname } from "node:path";
 import type { ShimConfig } from "./config";
 import { BOOTSTRAP_CODE, MISSING_PACKAGES_PROBE, parseMissingPackages } from "./domain/bootstrap";
 import { buildInstallCode } from "./domain/deps";
-import { buildNotebook, type CellRecord } from "./domain/notebook";
+import { buildNotebook, type CellRecord, type NotebookMeta } from "./domain/notebook";
+import { stripAnsi } from "./domain/output";
 import { Subject } from "./domain/subject";
 import {
   type CellResult,
@@ -23,12 +24,19 @@ import {
   type Session,
   TimeoutError,
 } from "./domain/types";
-import type { KernelPort, ServerPort } from "./kernel/port";
+import type {
+  ExecuteOutcome,
+  KernelPort,
+  KernelSpecInfo,
+  KernelSpecList,
+  ServerPort,
+} from "./kernel/port";
 
 export class RemoteSession implements Session {
   readonly notebookId: string;
 
   private kernel: KernelPort | null = null;
+  private kernelSpec: KernelSpecInfo | null = null;
   private execCount = 0;
   private cells: CellRecord[] = [];
   private deps = new Set<string>();
@@ -45,15 +53,23 @@ export class RemoteSession implements Session {
     for (const d of opts.dependencies ?? []) this.deps.add(d.trim());
   }
 
+  /** Kernel language (lower-cased); "python" when the kernelspec is unknown. */
+  get language(): string {
+    return (this.kernelSpec?.language ?? "python").toLowerCase();
+  }
+
   /** Connect to the server, start a kernel, bootstrap, and pre-install deps. */
   async initialize(): Promise<void> {
     await this.server.ping();
+    // Validate kernelName against the server's kernelspecs *before* starting,
+    // so a typo (or a display name like "R" instead of "ir") fails with a
+    // clear, actionable message (UX-7).
+    this.kernelSpec = await this.resolveKernelSpec();
     this.kernel = await this.server.startKernel(this.config.kernelName);
     await this.kernel.waitConnected();
 
-    // Idempotent bootstrap: matplotlib inline + missing-package warnings.
-    await this.kernel.execute(BOOTSTRAP_CODE, { timeoutMs: 30_000, silent: true });
-    this.warnings = await this.probeMissingPackages();
+    // Idempotent bootstrap + missing-package warnings (python-only, BUG-4).
+    await this.bootstrap();
 
     if (this.deps.size > 0) await this.install([...this.deps]);
   }
@@ -61,7 +77,7 @@ export class RemoteSession implements Session {
   // ── core: execute code ────────────────────────────────────────────────────
 
   async runCell(source: string, opts: RunCellOpts = {}): Promise<CellResult> {
-    const kernel = this.requireKernel();
+    let kernel = this.requireKernel();
     const cellId = `cell-${randomUUID().slice(0, 8)}`;
     const executionId = `exec-${randomUUID().slice(0, 8)}`;
     const timeoutMs = opts.timeoutMs ?? this.config.defaultTimeoutMs;
@@ -76,6 +92,21 @@ export class RemoteSession implements Session {
     };
 
     try {
+      // A previous execution may have timed out on a kernel that ignores
+      // interrupts and never returned to idle (BUG-6).  Rather than silently
+      // queueing behind leftover computation, recover or fail fast.
+      if (kernel.status === "busy") {
+        if (this.config.timeoutRestartKernel) {
+          await this.restartKernel("kernel was still busy after a previous timeout");
+          kernel = this.requireKernel();
+        } else {
+          throw new Error(
+            "[pi-jupyter] kernel still busy after a previous timeout. " +
+              "Run /python-reset to start fresh, or set timeoutRestartKernel " +
+              "(JUPYTER_TIMEOUT_RESTART_KERNEL=1) to auto-recover (state will be lost).",
+          );
+        }
+      }
       const { outputs, executionCount, status } = await kernel.execute(source, {
         timeoutMs,
         onUpdate: (outs: JsOutput[]) => {
@@ -121,10 +152,19 @@ export class RemoteSession implements Session {
 
   // ── save to disk ──────────────────────────────────────────────────────────
 
-  async saveNotebook(path?: string): Promise<void> {
+  /**
+   * Write the session to an `.ipynb`.  Returns the path actually written
+   * (callers should pass an absolute path; BUG-3).  The notebook header
+   * reflects the real kernelspec/language (BUG-2).
+   */
+  async saveNotebook(path?: string): Promise<string> {
     const savePath = path ?? `${this.notebookId}.ipynb`;
     mkdirSync(dirname(savePath), { recursive: true });
-    writeFileSync(savePath, JSON.stringify(buildNotebook(this.cells), null, 1));
+    writeFileSync(
+      savePath,
+      JSON.stringify(buildNotebook(this.cells, this.notebookMeta()), null, 1),
+    );
+    return savePath;
   }
 
   // ── lifecycle ─────────────────────────────────────────────────────────────
@@ -163,11 +203,42 @@ export class RemoteSession implements Session {
     return this.kernel;
   }
 
+  /**
+   * Fetch the kernelspec for `config.kernelName`, validating it exists (UX-7).
+   * Returns null when the server cannot list specs — we then degrade to the
+   * old behavior and let `startKernel` fail on its own.
+   */
+  private async resolveKernelSpec(): Promise<KernelSpecInfo | null> {
+    let list: KernelSpecList;
+    try {
+      list = await this.server.listKernelSpecs();
+    } catch {
+      return null;
+    }
+    const spec = list.specs.find((s) => s.name === this.config.kernelName);
+    if (!spec) throw new Error(formatKernelSpecMismatch(this.config.kernelName, list));
+    return spec;
+  }
+
+  /** Python-only kernel prep; other languages skip it cleanly (BUG-4). */
+  private async bootstrap(): Promise<void> {
+    if (this.language !== "python") {
+      this.warnings = [];
+      return;
+    }
+    const kernel = this.requireKernel();
+    await kernel.execute(BOOTSTRAP_CODE, { timeoutMs: 30_000, silent: true });
+    this.warnings = await this.probeMissingPackages();
+  }
+
   private async install(packages: string[]): Promise<void> {
     const kernel = this.requireKernel();
-    const code = buildInstallCode(packages);
+    const code = buildInstallCode(packages, this.language);
     if (!code) return;
-    await kernel.execute(code, { timeoutMs: this.config.installTimeoutMs });
+    const outcome = await kernel.execute(code, { timeoutMs: this.config.installTimeoutMs });
+    // `%pip` / install.packages failures must surface — never report success
+    // on a failed or errored install (BUG-1).
+    assertInstallSucceeded(outcome, packages);
   }
 
   private async probeMissingPackages(): Promise<string[]> {
@@ -183,8 +254,95 @@ export class RemoteSession implements Session {
     return parseMissingPackages(stdout);
   }
 
+  /** Notebook header metadata from the live kernelspec (BUG-2). */
+  private notebookMeta(): NotebookMeta {
+    const spec = this.kernelSpec;
+    return {
+      kernelName: spec?.name ?? this.config.kernelName,
+      displayName: spec?.displayName ?? this.config.kernelName,
+      language: this.language,
+    };
+  }
+
+  /**
+   * Restart the kernel to escape an unrecoverable busy state (BUG-6 recovery
+   * policy).  Re-runs bootstrap and reinstalls deps; in-memory state is lost.
+   */
+  private async restartKernel(reason: string): Promise<void> {
+    const old = this.kernel;
+    this.kernel = null;
+    if (old) {
+      try {
+        if (!old.isDisposed) await old.shutdown();
+      } catch {
+        /* ignore */
+      }
+      old.dispose();
+    }
+    this.kernel = await this.server.startKernel(this.config.kernelName);
+    await this.kernel.waitConnected();
+    await this.bootstrap();
+    if (this.deps.size > 0) {
+      try {
+        await this.install([...this.deps]);
+      } catch (err) {
+        this.warnings.push(`reinstall after restart failed: ${(err as Error).message}`);
+      }
+    }
+    this.warnings.push(`kernel restarted (${reason}); in-memory state was lost`);
+  }
+
   private disposeKernel(): void {
     this.kernel?.dispose();
     this.kernel = null;
   }
+}
+
+/**
+ * Build a clear error for a kernelName that matches no kernelspec (UX-7):
+ * lists the available kernels grouped by language and reminds the user that
+ * kernelName is the spec *name* (e.g. "ir"), not the display name ("R").
+ */
+export function formatKernelSpecMismatch(requested: string, list: KernelSpecList): string {
+  const byLanguage = new Map<string, KernelSpecInfo[]>();
+  for (const spec of list.specs) {
+    const lang = spec.language || "unknown";
+    const bucket = byLanguage.get(lang);
+    if (bucket) bucket.push(spec);
+    else byLanguage.set(lang, [spec]);
+  }
+  const groups = [...byLanguage.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(
+      ([lang, specs]) =>
+        `  ${lang}: ${specs.map((s) => `${s.name} (${s.displayName})`).join(", ")}`,
+    )
+    .join("\n");
+  return [
+    `[pi-jupyter] kernel "${requested}" not found on the Jupyter server.`,
+    'kernelName must be a kernelspec *name* (e.g. "ir"), not a display name (e.g. "R").',
+    "Available kernels:",
+    groups,
+    list.default ? `default: ${list.default}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/** Throw when an install run failed or produced error outputs (BUG-1). */
+function assertInstallSucceeded(outcome: ExecuteOutcome, packages: string[]): void {
+  const errorOutputs = outcome.outputs.filter((o) => o.outputType === "error");
+  if (outcome.status === "ok" && errorOutputs.length === 0) return;
+  const errorText = errorOutputs
+    .map((o) => [`${o.ename ?? "Error"}: ${o.evalue ?? ""}`, ...(o.traceback ?? [])].join("\n"))
+    .join("\n");
+  const stderrText = outcome.outputs
+    .filter((o) => o.outputType === "stream" && o.name === "stderr" && o.text)
+    .map((o) => o.text)
+    .join("");
+  const detail = stripAnsi((errorText || stderrText).trim());
+  throw new Error(
+    `[pi-jupyter] failed to install ${packages.join(", ")} (status: ${outcome.status})` +
+      (detail ? `:\n${detail}` : ""),
+  );
 }

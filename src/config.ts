@@ -11,6 +11,10 @@
  *
  * Optional config file: ~/.pi-jupyter/config.json
  *   { "url": "...", "token": "...", "kernelName": "python3", ... }
+ *
+ * Optional extras: JUPYTER_WORKING_DIR (base for relative save paths) and
+ * JUPYTER_TIMEOUT_RESTART_KERNEL=1 (auto-restart a kernel still busy after a
+ * timeout).
  */
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -23,9 +27,13 @@ export interface ShimConfig {
   tlsInsecure: boolean;
   defaultTimeoutMs: number;
   installTimeoutMs: number;
+  /** Base directory for relative save paths (BUG-3). Defaults to the cwd. */
+  workingDir: string;
+  /** Restart the kernel when it is still busy after a timeout (BUG-6). */
+  timeoutRestartKernel: boolean;
 }
 
-const CONFIG_HINT =
+export const CONFIG_HINT =
   "[pi-jupyter] Remote Jupyter Server is not configured.\n" +
   "  export JUPYTER_REMOTE_URL=http://host:port      # e.g. http://192.168.105.1:57002\n" +
   "  export JUPYTER_REMOTE_TOKEN=<your-token>\n" +
@@ -70,6 +78,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       intEnv(env, "JUPYTER_INSTALL_TIMEOUT_MS") ??
       (file.installTimeoutMs as number | undefined) ??
       600_000,
+    workingDir:
+      env.JUPYTER_WORKING_DIR ?? (file.workingDir as string | undefined) ?? process.cwd(),
+    timeoutRestartKernel:
+      env.JUPYTER_TIMEOUT_RESTART_KERNEL === "1" || file.timeoutRestartKernel === true,
   };
 }
 

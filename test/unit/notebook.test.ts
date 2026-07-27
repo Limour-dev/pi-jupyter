@@ -26,6 +26,28 @@ describe("buildNotebook", () => {
     expect(nb.cells).toEqual([]);
   });
 
+  it("defaults the kernelspec header to Python 3", () => {
+    const nb = buildNotebook([]) as any;
+    expect(nb.metadata.kernelspec).toEqual({
+      display_name: "Python 3",
+      language: "python",
+      name: "python3",
+    });
+    expect(nb.metadata.language_info).toEqual({ name: "python" });
+  });
+
+  it("uses the supplied kernelspec metadata (R example)", () => {
+    const nb = buildNotebook([], {
+      kernelName: "ir",
+      displayName: "R",
+      language: "r",
+    }) as any;
+    expect(nb.metadata.kernelspec.name).toBe("ir");
+    expect(nb.metadata.kernelspec.display_name).toBe("R");
+    expect(nb.metadata.kernelspec.language).toBe("r");
+    expect(nb.metadata.language_info.name).toBe("r");
+  });
+
   it("serializes a stream + execute_result cell", () => {
     const cells: CellRecord[] = [
       {
