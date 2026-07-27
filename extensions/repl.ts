@@ -129,6 +129,12 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     const unique = [...new Set(packages.map((p) => p.trim()).filter(Boolean))];
     if (!unique.length) return;
     await sess.addDependencies(unique);
+    // syncEnvironment installs only the not-yet-committed packages, commits
+    // just the ones that installed to the persistent desired set, and throws
+    // if any requested package failed (keeping partial successes). A failed
+    // name therefore never persists to poison a later call — that throw is
+    // surfaced verbatim by the jupyter_add_dependencies tool (issue "poisoned
+    // deps set").
     await sess.syncEnvironment();
   }
 

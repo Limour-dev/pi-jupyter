@@ -615,3 +615,169 @@ describe("RemoteSession — remote auto-save (PRD 远端自动落盘)", () => {
     rmSync(p, { force: true });
   });
 });
+
+// ── issue "poisoned deps set": a failed name must not block future installs ──
+
+/**
+ * Mock an R kernel install where `failedPkgs` never become loadable and every
+ * other requested package installs. The CRAN reachability probe always reports
+ * TRUE; install code is answered with PI_INSTALL_* markers mirroring the
+ * per-package requireNamespace() verdict the real R code emits.
+ */
+function mockRInstallOutcomes(
+  kernel: ReturnType<typeof makeKernelPort>,
+  failedPkgs: string[],
+): void {
+  const bad = new Set(failedPkgs);
+  kernel.execute.mockImplementation(async (code: string) => {
+    if (code.includes("cat(isTRUE")) {
+      return {
+        outputs: [{ outputType: "stream" as const, name: "stdout", text: "TRUE" }],
+        status: "ok" as const,
+        executionCount: undefined,
+      };
+    }
+    if (code.includes("install.packages")) {
+      // The install loop runs over `pkgs <- c("a", "b")`; extract that vector.
+      const vector = code.match(/pkgs <- c\(([^)]*)\)/)?.[1] ?? "";
+      const requested = [...vector.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+      const ok = requested.filter((p) => !bad.has(p));
+      const fail = requested.filter((p) => bad.has(p));
+      const lines = [
+        ...(ok.length ? [`PI_INSTALL_OK ${ok.join(" ")}`] : []),
+        ...(fail.length ? [`PI_INSTALL_FAILED ${fail.join(" ")}`] : []),
+      ];
+      return {
+        outputs: [{ outputType: "stream" as const, name: "stdout", text: lines.join("\n") }],
+        // warn=2 + tryCatch means the cell completes; the verdict is in stdout.
+        status: "ok" as const,
+        executionCount: 1,
+      };
+    }
+    return { outputs: [], status: "ok" as const, executionCount: undefined };
+  });
+}
+
+describe("RemoteSession — poisoned deps set (failed install must not block future installs)", () => {
+  let kernel: ReturnType<typeof makeKernelPort>;
+  let server: ReturnType<typeof makeServerPort>;
+
+  beforeEach(() => {
+    kernel = makeKernelPort();
+    server = makeServerPort(kernel);
+  });
+
+  it("a failed package does not poison a later call with a valid package (issue repro)", async () => {
+    kernel.execute.mockImplementation(async (code: string) => {
+      if (code.includes("%pip")) {
+        const ok = code.includes("does-not-exist") ? [] : ["zeallot"];
+        const failed = code.includes("does-not-exist") ? ["does-not-exist"] : [];
+        const lines = [
+          ...(ok.length ? [`PI_INSTALL_OK ${ok.join(" ")}`] : []),
+          ...(failed.length ? [`PI_INSTALL_FAILED ${failed.join(" ")}`] : []),
+        ];
+        return {
+          outputs: [{ outputType: "stream" as const, name: "stdout", text: lines.join("\n") }],
+          status: "error" as const,
+          executionCount: 1,
+        };
+      }
+      return { outputs: [], status: "ok" as const, executionCount: undefined };
+    });
+    const s = new RemoteSession(server, CONFIG);
+    await s.initialize();
+
+    await s.addDependencies(["nonexistent-pkg-zzz-test"]);
+    await expect(s.syncEnvironment()).rejects.toThrow(/nonexistent-pkg-zzz-test/);
+
+    // The valid package now installs on its own — the stale bad name is gone.
+    await s.addDependencies(["zeallot"]);
+    await expect(s.syncEnvironment()).resolves.toEqual(["zeallot"]);
+  });
+
+  it("R: a bad name beside a valid one keeps the valid package (per-package isolation)", async () => {
+    mockRInstallOutcomes(kernel, ["nonexistent-pkg-zzz-test"]);
+    const s = new RemoteSession(server, CONFIG_R);
+    await s.initialize();
+    kernel.execute.mockClear();
+
+    await s.addDependencies(["nonexistent-pkg-zzz-test", "zeallot"]);
+    // The call reports the bad name…
+    await expect(s.syncEnvironment()).rejects.toThrow(/nonexistent-pkg-zzz-test/);
+    // …but the loadable package was installed and committed, so a follow-up
+    // call requesting just it succeeds with nothing left to install.
+    await s.addDependencies(["zeallot"]);
+    await expect(s.syncEnvironment()).resolves.toEqual(["zeallot"]);
+    const codes = kernel.execute.mock.calls.map((c) => c[0] as string);
+    expect(codes.some((c) => c.includes("install.packages") && c.includes('"zeallot"'))).toBe(true);
+  });
+
+  it("an all-failed install commits nothing and rejects", async () => {
+    mockRInstallOutcomes(kernel, ["bad-a", "bad-b"]);
+    const s = new RemoteSession(server, CONFIG_R);
+    await s.initialize();
+    kernel.execute.mockClear();
+
+    await s.addDependencies(["bad-a", "bad-b"]);
+    await expect(s.syncEnvironment()).rejects.toThrow(/bad-a, bad-b/);
+    await expect(s.syncEnvironment()).resolves.toEqual([]); // nothing committed
+
+    // A later valid package still installs.
+    mockRInstallOutcomes(kernel, []);
+    await s.addDependencies(["good"]);
+    await expect(s.syncEnvironment()).resolves.toEqual(["good"]);
+  });
+
+  it("restart-recovery reinstalls the desired set and drops any name that no longer installs", async () => {
+    const s = new RemoteSession(server, { ...CONFIG_R, timeoutRestartKernel: true });
+    await s.initialize();
+    mockRInstallOutcomes(kernel, ["bad"]);
+    await s.addDependencies(["good", "bad"]);
+    await expect(s.syncEnvironment()).rejects.toThrow(/bad/); // good committed, bad dropped
+
+    // Force a restart (busy kernel); recovery reinstalls the desired set.
+    (kernel as { status: string }).status = "busy";
+    const r = await s.runCell("1+1");
+    expect(r.status).toBe("done");
+
+    // The desired set now excludes the dropped "bad": a follow-up sync of the
+    // good package needs nothing reinstalled.
+    mockRInstallOutcomes(kernel, []);
+    await s.addDependencies(["good"]);
+    await expect(s.syncEnvironment()).resolves.toEqual(["good"]);
+  });
+
+  it("python without markers still reports success and commits the package", async () => {
+    kernel.execute.mockImplementation(async (code: string) => {
+      if (code.includes("%pip")) {
+        return {
+          outputs: [{ outputType: "stream" as const, name: "stdout", text: "PI_INSTALL_OK numpy" }],
+          status: "ok" as const,
+          executionCount: 1,
+        };
+      }
+      return { outputs: [], status: "ok" as const, executionCount: undefined };
+    });
+    const s = new RemoteSession(server, CONFIG);
+    await s.initialize();
+    await s.addDependencies(["numpy"]);
+    await expect(s.syncEnvironment()).resolves.toEqual(["numpy"]);
+  });
+
+  it("legacy kernel with no markers falls back to whole-batch success when status is ok", async () => {
+    kernel.execute.mockImplementation(async (code: string) => {
+      if (code.includes("%pip")) {
+        return {
+          outputs: [{ outputType: "stream" as const, name: "stdout", text: "Successfully installed" }],
+          status: "ok" as const,
+          executionCount: 1,
+        };
+      }
+      return { outputs: [], status: "ok" as const, executionCount: undefined };
+    });
+    const s = new RemoteSession(server, CONFIG);
+    await s.initialize();
+    await s.addDependencies(["requests"]);
+    await expect(s.syncEnvironment()).resolves.toEqual(["requests"]);
+  });
+});

@@ -12,7 +12,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { ShimConfig } from "./config";
 import { BOOTSTRAP_CODE, MISSING_PACKAGES_PROBE, parseMissingPackages } from "./domain/bootstrap";
-import { buildInstallCode, installProbeCode, isRepoReachable, R_CRAN_REPO } from "./domain/deps";
+import { buildInstallCode, installProbeCode, isRepoReachable, parseInstallOutput, R_CRAN_REPO, type InstallOutputReport } from "./domain/deps";
 import { buildNotebook, type CellRecord, type NotebookMeta } from "./domain/notebook";
 import { stripAnsi } from "./domain/output";
 import { Subject } from "./domain/subject";
@@ -61,7 +61,20 @@ export class RemoteSession implements Session {
   private kernelSpec: KernelSpecInfo | null = null;
   private execCount = 0;
   private cells: CellRecord[] = [];
+  /**
+   * Desired environment that is KNOWN to be installed. Only a package whose
+   * install succeeded is ever committed here (issue "poisoned deps set",
+   * Option 1): a name that fails to install is dropped, so it can never poison
+   * a later call. This set is the restart-recovery source of truth —
+   * `restartKernel` reinstalls exactly these names.
+   */
   private deps = new Set<string>();
+  /**
+   * Packages requested via addDependencies() but not yet confirmed installed.
+   * syncEnvironment() installs them and commits only the successes to `deps`,
+   * then clears this buffer — a failure here never leaks into `deps`.
+   */
+  private pending = new Set<string>();
   private warnings: string[] = [];
   /** Outcome of the most recent remote auto-save (FR-6.4). */
   private lastAutoSave?: AutoSaveInfo;
@@ -112,7 +125,19 @@ export class RemoteSession implements Session {
     await this.bootstrap();
     if (this.effectivePathWarning) this.warnings.push(this.effectivePathWarning);
 
-    if (this.deps.size > 0) await this.install([...this.deps]);
+    if (this.deps.size > 0) {
+      // Commit only what actually installed; drop any name that failed so the
+      // desired set stays installable (issue "poisoned deps set"). A partial
+      // failure does not abort startup — it is surfaced as a warning instead.
+      const { installed, failed } = await this.install([...this.deps]);
+      if (failed.length) {
+        for (const p of failed) this.deps.delete(p);
+        this.warnings.push(
+          `pre-install failed for: ${failed.join(", ")}` +
+            (installed.length ? ` (installed: ${installed.join(", ")})` : ""),
+        );
+      }
+    }
   }
 
   // ── core: execute code ────────────────────────────────────────────────────
@@ -211,12 +236,37 @@ export class RemoteSession implements Session {
 
   // ── dependency management ─────────────────────────────────────────────────
 
+  /**
+   * Record packages as *requested*. They are not committed to the persistent
+   * desired set until syncEnvironment() confirms they actually installed
+   * (issue "poisoned deps set", Option 1) — so a name that later fails to
+   * install never poisons a future call or a restart-recovery reinstall.
+   */
   async addDependencies(packages: string[]): Promise<void> {
-    for (const p of packages) this.deps.add(p.trim());
+    for (const p of packages) this.pending.add(p.trim());
   }
 
-  async syncEnvironment(): Promise<void> {
-    if (this.deps.size) await this.install([...this.deps]);
+  /**
+   * Install everything requested-but-uncommitted and commit only the packages
+   * that installed to the persistent desired set. Failed names are dropped (not
+   * committed), so they are never reinstalled on a later call or after a
+   * restart. Resolves to the packages now known to be available. Throws when
+   * one or more requested packages could not be installed — but any packages
+   * that DID install remain committed (partial success is preserved).
+   */
+  async syncEnvironment(): Promise<string[]> {
+    const requested = [...this.pending];
+    this.pending.clear();
+    // Install only names not already known to be installed.
+    const toInstall = [...new Set(requested)].filter((p) => p && !this.deps.has(p));
+    if (toInstall.length) {
+      const { installed, failed } = await this.install(toInstall);
+      for (const p of installed) this.deps.add(p); // commit successes only
+      if (failed.length) {
+        throw new Error(installFailureMessage(failed, installed));
+      }
+    }
+    return [...this.deps];
   }
 
   // ── save to disk ──────────────────────────────────────────────────────────
@@ -313,15 +363,23 @@ export class RemoteSession implements Session {
     this.warnings = await this.probeMissingPackages();
   }
 
-  private async install(packages: string[]): Promise<void> {
+  /**
+   * Install packages and report which ones actually installed. A partial
+   * failure does NOT throw — the caller commits `installed` and handles
+   * `failed` (issue "poisoned deps set", Option 1). Only a whole-batch failure
+   * (nothing installed) throws, so a lone bad name can never block the
+   * loadable packages beside it.
+   */
+  private async install(packages: string[]): Promise<{ installed: string[]; failed: string[] }> {
     // Serialize with running cells on the same kernel (BUG-7).
-    await this.withKernelLock(() => this.runInstall(packages));
+    return this.withKernelLock(() => this.runInstall(packages));
   }
 
-  private async runInstall(packages: string[]): Promise<void> {
+  private async runInstall(packages: string[]): Promise<{ installed: string[]; failed: string[] }> {
+    if (packages.length === 0) return { installed: [], failed: [] };
     const kernel = this.requireKernel();
     const code = buildInstallCode(packages, this.language);
-    if (!code) return;
+    if (!code) return { installed: [], failed: [] };
     // Fail fast when the package repo is unreachable, instead of letting the
     // install block on the network until installTimeoutMs (BUG-8). R only;
     // %pip already surfaces a quick, readable network error.
@@ -348,9 +406,21 @@ export class RemoteSession implements Session {
       }
     }
     const outcome = await kernel.execute(code, { timeoutMs: this.config.installTimeoutMs });
-    // `%pip` / install.packages failures must surface — never report success
-    // on a failed or errored install (BUG-1).
-    assertInstallSucceeded(outcome, packages);
+    const stdout = outcome.outputs
+      .filter((o: JsOutput) => o.outputType === "stream" && o.text)
+      .map((o: JsOutput) => o.text!)
+      .join("\n");
+    const report = parseInstallOutput(stdout);
+    const installed = reconcileInstalled(packages, report, outcome.status);
+    const installedSet = new Set(installed.map(basePackageName));
+    const failed = packages.filter((p) => !installedSet.has(basePackageName(p)));
+    // `%pip` / install.packages failures must still surface (BUG-1) — but only
+    // when NOTHING installed. A partial failure resolves with `failed` set so
+    // the caller keeps the loadable packages (issue "poisoned deps set").
+    if (installed.length === 0) {
+      throw new Error(installFailureMessage(failed, installed, outcome, report));
+    }
+    return { installed, failed };
   }
 
   private async probeMissingPackages(): Promise<string[]> {
@@ -502,7 +572,15 @@ export class RemoteSession implements Session {
     if (this.effectivePathWarning) this.warnings.push(this.effectivePathWarning);
     if (this.deps.size > 0) {
       try {
-        await this.install([...this.deps]);
+        // Reinstall the desired set; drop any name that no longer installs so
+        // the set stays installable (issue "poisoned deps set").
+        //
+        // Call runInstall DIRECTLY, not install(): restartKernel runs inside
+        // executeCell, which already holds the FIFO kernel lock. install() would
+        // re-enter withKernelLock and deadlock — runInstall would queue behind a
+        // chain that is itself waiting on this very execution to finish.
+        const { failed } = await this.runInstall([...this.deps]);
+        for (const p of failed) this.deps.delete(p);
       } catch (err) {
         this.warnings.push(`reinstall after restart failed: ${(err as Error).message}`);
       }
@@ -547,20 +625,65 @@ export function formatKernelSpecMismatch(requested: string, list: KernelSpecList
     .join("\n");
 }
 
-/** Throw when an install run failed or produced error outputs (BUG-1). */
-function assertInstallSucceeded(outcome: ExecuteOutcome, packages: string[]): void {
-  const errorOutputs = outcome.outputs.filter((o) => o.outputType === "error");
-  if (outcome.status === "ok" && errorOutputs.length === 0) return;
-  const errorText = errorOutputs
-    .map((o) => [`${o.ename ?? "Error"}: ${o.evalue ?? ""}`, ...(o.traceback ?? [])].join("\n"))
-    .join("\n");
-  const stderrText = outcome.outputs
-    .filter((o) => o.outputType === "stream" && o.name === "stderr" && o.text)
-    .map((o) => o.text)
-    .join("");
-  const detail = stripAnsi((errorText || stderrText).trim());
-  throw new Error(
-    `[pi-jupyter] failed to install ${packages.join(", ")} (status: ${outcome.status})` +
-      (detail ? `:\n${detail}` : ""),
+/**
+ * Map a requested spec back to whether it installed. When the per-package
+ * markers are present we trust the kernel's requireNamespace verdict and match
+ * by base name (a pip spec like `numpy>=2` installs as `numpy`). Without
+ * markers we fall back to the legacy whole-batch view: success only when the
+ * execution was ok.
+ */
+function reconcileInstalled(
+  packages: string[],
+  report: InstallOutputReport,
+  status: string,
+): string[] {
+  if (report.hasMarkers) {
+    const ok = new Set(report.ok);
+    return packages.filter((p) => ok.has(basePackageName(p)));
+  }
+  return status === "ok" ? [...packages] : [];
+}
+
+/** Base package name from a spec: `numpy>=2` → `numpy`, `dplyr` → `dplyr`. */
+function basePackageName(spec: string): string {
+  return spec.split(/[<>=!~\[]/)[0].trim();
+}
+
+/**
+ * Build the install-failure error. Names the packages that could not be
+ * installed and, when available, the trimmed kernel detail. Notes any partial
+ * success so the message is not mistaken for a total failure (BUG-1 surface).
+ */
+function installFailureMessage(
+  failed: string[],
+  installed: string[],
+  outcome?: ExecuteOutcome,
+  report?: InstallOutputReport,
+): string {
+  const names = failed.length ? failed.join(", ") : "the requested packages";
+  let detail = "";
+  if (outcome) {
+    const errorOutputs = outcome.outputs.filter((o) => o.outputType === "error");
+    const errorText = errorOutputs
+      .map((o) => [`${o.ename ?? "Error"}: ${o.evalue ?? ""}`, ...(o.traceback ?? [])].join("\n"))
+      .join("\n");
+    const stderrText = outcome.outputs
+      .filter((o) => o.outputType === "stream" && o.name === "stderr" && o.text)
+      .map((o) => o.text)
+      .join("");
+    const raw = stripAnsi((errorText || stderrText).trim());
+    detail = raw.length > 1200 ? `${raw.slice(0, 1200)}…` : raw;
+  }
+  // R per-package failures are caught in-kernel (tryCatch), so the execution
+  // can be status "ok" with no error output — fall back to the marker verdict.
+  if (!detail && report && report.failed.length) {
+    detail = `not installable / not loadable: ${report.failed.join(", ")}`;
+  }
+  const partial = installed.length
+    ? ` (these installed and were kept: ${installed.join(", ")})`
+    : "";
+  return (
+    `[pi-jupyter] failed to install ${names}${partial}` +
+    (detail ? `:\n${detail}` : "")
   );
 }

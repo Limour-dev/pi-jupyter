@@ -6,14 +6,23 @@
  *
  *   python → `%pip install --quiet <p>`   (IPython built-in; installs into the
  *                                           current kernel's env, never system)
- *   r      → `install.packages(c(...), repos = "https://cloud.r-project.org")`
- *            (wrapped so warnings become errors — a failed CRAN install then
- *             surfaces as an error output instead of a silent no-op)
+ *   r      → one `install.packages(<pkg>)` per package, each wrapped in
+ *            tryCatch with warn = 2, then a `requireNamespace` verification.
+ *            Per-package isolation means ONE unavailable CRAN name can no
+ *            longer abort the whole batch via getDependencies() (issue
+ *            "poisoned deps set", Option 3); the loadable packages still go
+ *            in. Each run prints machine-readable PI_INSTALL_* markers so the
+ *            session can commit exactly the packages that installed (Option 1).
  *   other  → unsupported; we refuse rather than emit code that cannot work.
  *
- * The install log streams back as normal stdout; failures surface as error
- * outputs, which the session checks (see `session.ts` install()).
+ * The install log streams back as normal stdout; the PI_INSTALL_* markers are
+ * parsed by `parseInstallOutput` (see below / session.ts runInstall()).
  */
+
+/** Machine-readable marker: space-separated base names that ARE loadable. */
+export const INSTALL_OK_MARKER = "PI_INSTALL_OK";
+/** Machine-readable marker: space-separated base names that failed. */
+export const INSTALL_FAILED_MARKER = "PI_INSTALL_FAILED";
 
 /**
  * Build the install code for a set of package specs. Pure and deterministic.
@@ -30,19 +39,83 @@ export function buildInstallCode(packages: string[], language = "python"): strin
     return uniq.map((p) => `%pip install --quiet ${p}`).join("\n");
   }
   if (lang === "r") {
-    const vector = uniq.map((p) => rString(p)).join(", ");
-    // warn = 2 promotes install-failure warnings to errors so a failed CRAN
-    // install is caught by the session's error check; on.exit restores options.
-    return (
-      "local({ old <- options(warn = 2); on.exit(options(old)); " +
-      `install.packages(c(${vector}), repos = "https://cloud.r-project.org") })`
-    );
+    return buildRInstallCode(uniq);
   }
   throw new Error(`[pi-jupyter] unsupported language for hot-install: ${language}`);
 }
 
+/**
+ * Per-package R install (issue "poisoned deps set", Option 3).
+ *
+ * The old form emitted a single `install.packages(c("a", "b"), …)` with
+ * warn = 2: when "a" was unavailable, getDependencies() raised BEFORE
+ * anything installed, so a valid "b" in the same batch never went in. Here
+ * each package installs in its own tryCatch (warn = 2 promotes failure
+ * warnings to errors so they are caught), the loop never aborts, and a final
+ * requireNamespace() check decides what is actually loadable. Machine-readable
+ * PI_INSTALL_* markers report the partition back to the session so it commits
+ * only the packages that installed (Option 1) and keeps the loadable ones even
+ * when the call as a whole failed.
+ */
+function buildRInstallCode(uniq: string[]): string {
+  const vector = uniq.map((p) => rString(p)).join(", ");
+  return (
+    "local({\n" +
+    "  old <- options(warn = 2); on.exit(options(old));\n" +
+    `  pkgs <- c(${vector});\n` +
+    "  ok <- character(0); failed <- character(0);\n" +
+    "  sanitize <- function(x) gsub('[^A-Za-z0-9._]', '', as.character(x));\n" +
+    "  for (p in pkgs) {\n" +
+    "    res <- tryCatch({ install.packages(p, repos = " +
+    `"${R_CRAN_REPO}"); "ok" }, error = function(e) "fail", warning = function(w) "fail");\n` +
+    "    if (identical(res, 'ok') && requireNamespace(p, quietly = TRUE)) {\n" +
+    "      ok <- c(ok, sanitize(p));\n" +
+    "    } else { failed <- c(failed, sanitize(p)) }\n" +
+    "  };\n" +
+    "  if (length(ok)) cat('\n" + INSTALL_OK_MARKER + " ', paste(ok, collapse = ' '), '\\n', sep = '');\n" +
+    "  if (length(failed)) cat('\n" + INSTALL_FAILED_MARKER + " ', paste(failed, collapse = ' '), '\\n', sep = '');\n" +
+    "})"
+  );
+}
+
 /** CRAN mirror used for R hot-installs (kept in sync with buildInstallCode). */
 export const R_CRAN_REPO = "https://cloud.r-project.org";
+
+/**
+ * Parsed outcome of an install run, derived from its collected stdout.
+ * `hasMarkers` tells the caller whether the per-package markers were seen —
+ * without them we can only fall back to whole-batch success/failure.
+ */
+export type InstallOutputReport = {
+  hasMarkers: boolean;
+  /** Base names that ARE loadable after the run. */
+  ok: string[];
+  /** Base names that failed to install / are not loadable. */
+  failed: string[];
+};
+
+/**
+ * Parse the PI_INSTALL_* markers out of an install run's collected stdout.
+ * Tolerant of surrounding install noise and of either marker being absent
+ * (a fully-successful run prints no FAILED line, and vice versa).
+ */
+export function parseInstallOutput(stdoutText: string): InstallOutputReport {
+  const read = (marker: string): string[] => {
+    const line = stdoutText
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find((l) => l.startsWith(marker));
+    if (!line) return [];
+    return line
+      .slice(marker.length)
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+  };
+  const ok = read(INSTALL_OK_MARKER);
+  const failed = read(INSTALL_FAILED_MARKER);
+  return { hasMarkers: ok.length > 0 || failed.length > 0, ok, failed };
+}
 
 /**
  * Build a lightweight, kernel-side reachability probe for the install source.

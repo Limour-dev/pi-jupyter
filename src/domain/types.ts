@@ -110,7 +110,13 @@ export interface Session {
   readonly notebookId: string;
   runCell(code: string, opts?: RunCellOpts): Promise<CellResult>;
   addDependencies(packages: string[]): Promise<void>;
-  syncEnvironment(): Promise<void>;
+  /**
+   * Install requested-but-uncommitted packages, committing only the ones that
+   * succeed (issue "poisoned deps set"). Resolves to the packages now known to
+   * be available; throws when one or more requested packages could not install
+   * (any partial success stays committed).
+   */
+  syncEnvironment(): Promise<string[]>;
   /** Write the session to an .ipynb; resolves to the path written. */
   saveNotebook(path?: string): Promise<string>;
   shutdown(): Promise<void>;

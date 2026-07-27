@@ -2,7 +2,7 @@
  * Unit tests: dependency manager (language-aware install code builder).
  */
 import { describe, expect, it } from "vitest";
-import { buildInstallCode } from "../../src/domain/deps";
+import { buildInstallCode, parseInstallOutput } from "../../src/domain/deps";
 
 describe("buildInstallCode (python)", () => {
   it("emits one %pip line per package", () => {
@@ -44,9 +44,19 @@ describe("buildInstallCode (r)", () => {
     expect(code).not.toContain("%pip");
   });
 
-  it("maps multiple packages to an R string vector", () => {
+  it("installs each R package individually (one unavailable name can't abort the batch)", () => {
     const code = buildInstallCode(["dplyr", "tidyr"], "R");
-    expect(code).toContain('c("dplyr", "tidyr")');
+    // Per-package isolation (issue "poisoned deps set", Option 3): no single
+    // install.packages(c(...)) batch that getDependencies() can abort wholesale.
+    // Instead the names go into an iteration list and each is installed in its
+    // own tryCatch, verified by requireNamespace, so one bad name can't stop
+    // the rest.
+    expect(code).not.toContain("install.packages(c(");
+    expect(code).toContain('pkgs <- c("dplyr", "tidyr")');
+    expect(code).toContain("for (p in pkgs)");
+    expect(code).toContain("install.packages(p");
+    expect(code).toContain("tryCatch");
+    expect(code).toContain("requireNamespace");
   });
 
   it("escapes quotes and backslashes in package specs", () => {
@@ -56,7 +66,9 @@ describe("buildInstallCode (r)", () => {
 
   it("dedupes R packages too", () => {
     const code = buildInstallCode(["ggplot2", " ggplot2 "], "r");
-    expect(code.match(/ggplot2/g)).toHaveLength(1);
+    // The deduped name appears exactly once — in the iteration list. The loop
+    // body installs via the `p` variable, so a duplicate would show up here.
+    expect(code.match(/"ggplot2"/g)).toHaveLength(1);
   });
 });
 
@@ -67,5 +79,36 @@ describe("buildInstallCode (other languages)", () => {
 
   it("returns empty string before checking language when no packages", () => {
     expect(buildInstallCode([], "julia")).toBe("");
+  });
+});
+
+describe("parseInstallOutput (per-package markers)", () => {
+  it("parses a fully-successful run", () => {
+    const r = parseInstallOutput("noise\nPI_INSTALL_OK ggplot2 dplyr\n");
+    expect(r.hasMarkers).toBe(true);
+    expect(r.ok).toEqual(["ggplot2", "dplyr"]);
+    expect(r.failed).toEqual([]);
+  });
+
+  it("parses a partial-failure run", () => {
+    const r = parseInstallOutput(
+      "PI_INSTALL_OK ggplot2\nPI_INSTALL_FAILED nonexistent-pkg-zzz-test\n",
+    );
+    expect(r.ok).toEqual(["ggplot2"]);
+    expect(r.failed).toEqual(["nonexistent-pkg-zzz-test"]);
+  });
+
+  it("parses an all-failed run (no OK marker)", () => {
+    const r = parseInstallOutput("PI_INSTALL_FAILED badpkg\n");
+    expect(r.hasMarkers).toBe(true);
+    expect(r.ok).toEqual([]);
+    expect(r.failed).toEqual(["badpkg"]);
+  });
+
+  it("reports no markers for plain output", () => {
+    const r = parseInstallOutput("installing ... done\n");
+    expect(r.hasMarkers).toBe(false);
+    expect(r.ok).toEqual([]);
+    expect(r.failed).toEqual([]);
   });
 });
