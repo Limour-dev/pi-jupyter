@@ -9,6 +9,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { JupyterKernel } from "../../src/kernel/kernel";
 import type { JsOutput } from "../../src/domain/types";
+import { KernelInterruptedError } from "../../src/domain/types";
 
 // ── message factories (shaped so KernelMessage.is*Msg guards pass) ──────────
 
@@ -192,5 +193,29 @@ describe("JupyterKernel.execute (mock IFuture)", () => {
     expect(k.requestExecute).toHaveBeenCalledTimes(1);
     // the future returned by requestExecute is disposed after execution
     expect(k._future.dispose).toHaveBeenCalled();
+  });
+
+  it("translates a canceled shell future into KernelInterruptedError (BUG-7)", async () => {
+    const future: any = {
+      onIOPub: null,
+      onReply: null,
+      onStdin: null,
+      dispose: vi.fn(),
+      // jupyterlab rejects with this exact string when a future is disposed
+      // before its execute_reply arrives (interrupt / dropped connection).
+      done: Promise.reject(
+        new Error("Canceled future for execute_request message before replies were done"),
+      ),
+    };
+    const k: any = {
+      requestExecute: vi.fn(() => future),
+      interrupt: vi.fn().mockResolvedValue(undefined),
+      isDisposed: false,
+      status: "idle",
+      statusChanged: { connect: vi.fn(), disconnect: vi.fn() },
+    };
+    await expect(new JupyterKernel(k).execute("x")).rejects.toBeInstanceOf(
+      KernelInterruptedError,
+    );
   });
 });

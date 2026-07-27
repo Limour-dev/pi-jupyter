@@ -252,12 +252,50 @@ describe("RemoteSession — bug fixes", () => {
     const s = new RemoteSession(server, CONFIG_R);
     await s.initialize();
     kernel.execute.mockClear();
+    // The reachability probe runs first (BUG-8) — let it report the repo reachable.
+    kernel.execute.mockResolvedValueOnce({
+      outputs: [{ outputType: "stream", name: "stdout", text: "TRUE" }],
+      status: "ok" as const,
+      executionCount: undefined,
+    });
     await s.addDependencies(["ggplot2"]);
     await s.syncEnvironment();
-    const code = kernel.execute.mock.calls[0][0] as string;
-    expect(code).toContain("install.packages");
-    expect(code).toContain('"ggplot2"');
-    expect(code).not.toContain("%pip");
+    const codes = kernel.execute.mock.calls.map((c) => c[0] as string);
+    // The reachability probe runs first (BUG-8), then the install itself.
+    expect(codes.some((c) => c.includes("install.packages") && c.includes('"ggplot2"'))).toBe(true);
+    expect(codes.every((c) => !c.includes("%pip"))).toBe(true);
+  });
+
+  it("R install fails fast when the repo probe reports unreachable (BUG-8)", async () => {
+    const s = new RemoteSession(server, CONFIG_R);
+    await s.initialize();
+    kernel.execute.mockClear();
+    // The CRAN reachability probe prints FALSE.
+    kernel.execute.mockResolvedValueOnce({
+      outputs: [{ outputType: "stream", name: "stdout", text: "FALSE" }],
+      status: "ok" as const,
+      executionCount: undefined,
+    });
+    await s.addDependencies(["ggplot2"]);
+    await expect(s.syncEnvironment()).rejects.toThrow(/cannot reach the package repository/);
+    const codes = kernel.execute.mock.calls.map((c) => c[0] as string);
+    // The install itself must never run behind an unreachable repo.
+    expect(codes.some((c) => c.includes("install.packages"))).toBe(false);
+  });
+
+  it("R install proceeds when the repo probe reports reachable (BUG-8)", async () => {
+    const s = new RemoteSession(server, CONFIG_R);
+    await s.initialize();
+    kernel.execute.mockClear();
+    kernel.execute.mockResolvedValueOnce({
+      outputs: [{ outputType: "stream", name: "stdout", text: "TRUE" }],
+      status: "ok" as const,
+      executionCount: undefined,
+    });
+    await s.addDependencies(["ggplot2"]);
+    await s.syncEnvironment();
+    const codes = kernel.execute.mock.calls.map((c) => c[0] as string);
+    expect(codes.some((c) => c.includes("install.packages") && c.includes('"ggplot2"'))).toBe(true);
   });
 
   it("unsupported kernel language refuses hot-install", async () => {
@@ -302,6 +340,48 @@ describe("RemoteSession — bug fixes", () => {
     await s.initialize();
     const codes = kernel.execute.mock.calls.map((c) => c[0] as string);
     expect(codes.some((c) => c.includes("matplotlib"))).toBe(true);
+  });
+
+  // ── BUG-7: serialize concurrent kernel executions ──
+
+  it("runCell serializes concurrent calls — no overlapping kernel.execute", async () => {
+    let active = 0;
+    let overlapped = false;
+    kernel.execute.mockImplementation(async () => {
+      active += 1;
+      if (active > 1) overlapped = true;
+      await new Promise((r) => setTimeout(r, 15));
+      active -= 1;
+      return { outputs: [], status: "ok" as const, executionCount: 1 };
+    });
+    const s = new RemoteSession(server, CONFIG);
+    await s.initialize();
+    // Fire several cells in parallel; with the lock they must not overlap.
+    await Promise.all([s.runCell("a"), s.runCell("b"), s.runCell("c")]);
+    expect(overlapped).toBe(false);
+  });
+
+  it("runCell: KernelInterruptedError surfaces with its own name, not ShimError", async () => {
+    const { KernelInterruptedError } = await import("../../src/domain/types");
+    const s = new RemoteSession(server, CONFIG);
+    await s.initialize();
+    kernel.execute.mockRejectedValueOnce(new KernelInterruptedError());
+    const r = await s.runCell("1+1");
+    expect(r.status).toBe("error");
+    expect(r.success).toBe(false);
+    expect(r.outputs?.[0].ename).toBe("KernelInterruptedError");
+  });
+
+  it("a rejecting cell does not wedge the queue for later cells (BUG-7)", async () => {
+    const s = new RemoteSession(server, CONFIG);
+    await s.initialize();
+    kernel.execute.mockRejectedValueOnce(new Error("boom"));
+    const bad = await s.runCell("x");
+    expect(bad.success).toBe(false);
+    // The next cell still runs through the same (now healthy) chain.
+    const good = await s.runCell("y");
+    expect(good.status).toBe("done");
+    expect(good.success).toBe(true);
   });
 
   // ── BUG-6: busy kernel after timeout ──
@@ -411,6 +491,11 @@ describe("RemoteSession — remote auto-save (PRD 远端自动落盘)", () => {
     const s = new RemoteSession(server, CONFIG, { notebookId: "nb-coal" });
     await s.initialize();
     server.uploadNotebook.mockClear();
+    // A slow upload keeps a PUT in flight while the (now serialized, BUG-7)
+    // cells run, so their triggers coalesce into in-flight + trailing (FR-5.3).
+    server.uploadNotebook.mockImplementation(
+      () => new Promise<void>((r) => setTimeout(() => r(), 25)),
+    );
     await Promise.all([s.runCell("a = 1"), s.runCell("b = 2"), s.runCell("c = 3")]);
     await s.flushAutoSave();
     const calls = server.uploadNotebook.mock.calls;

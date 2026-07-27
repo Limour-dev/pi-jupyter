@@ -12,7 +12,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { ShimConfig } from "./config";
 import { BOOTSTRAP_CODE, MISSING_PACKAGES_PROBE, parseMissingPackages } from "./domain/bootstrap";
-import { buildInstallCode } from "./domain/deps";
+import { buildInstallCode, installProbeCode, isRepoReachable, R_CRAN_REPO } from "./domain/deps";
 import { buildNotebook, type CellRecord, type NotebookMeta } from "./domain/notebook";
 import { stripAnsi } from "./domain/output";
 import { Subject } from "./domain/subject";
@@ -25,6 +25,8 @@ import {
   type RuntimeStatus,
   type RunCellOpts,
   type Session,
+  KernelInterruptedError,
+  RepoUnreachableError,
   TimeoutError,
 } from "./domain/types";
 import type {
@@ -48,6 +50,14 @@ export class RemoteSession implements Session {
   onAutoSave?: (event: AutoSaveEvent) => void;
 
   private kernel: KernelPort | null = null;
+  /**
+   * FIFO serialization of kernel executions (BUG-7). runCell and install both
+   * await this chain so parallel tool calls never interleave two requestExecute
+   * on the single-threaded kernel — otherwise one cell's timeout interrupt
+   * cancels the other's in-flight future. The chain swallows each rejection so
+   * a failed call never wedges the ones queued behind it.
+   */
+  private kernelChain: Promise<void> = Promise.resolve();
   private kernelSpec: KernelSpecInfo | null = null;
   private execCount = 0;
   private cells: CellRecord[] = [];
@@ -108,6 +118,27 @@ export class RemoteSession implements Session {
   // ── core: execute code ────────────────────────────────────────────────────
 
   async runCell(source: string, opts: RunCellOpts = {}): Promise<CellResult> {
+    // Fail fast when there is no kernel — before queueing on the lock.
+    this.requireKernel();
+    // Serialize on the shared kernel so parallel calls cannot collide (BUG-7).
+    return this.withKernelLock(() => this.executeCell(source, opts));
+  }
+
+  /**
+   * Run `fn` exclusively on the kernel (FIFO). A rejecting call is handed to
+   * its caller but never breaks the queue for the calls behind it.
+   */
+  private withKernelLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.kernelChain.then(fn, fn);
+    this.kernelChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  /** The actual cell execution; always runs under the kernel lock. */
+  private async executeCell(source: string, opts: RunCellOpts): Promise<CellResult> {
     let kernel = this.requireKernel();
     const cellId = `cell-${randomUUID().slice(0, 8)}`;
     const executionId = `exec-${randomUUID().slice(0, 8)}`;
@@ -124,8 +155,9 @@ export class RemoteSession implements Session {
 
     try {
       // A previous execution may have timed out on a kernel that ignores
-      // interrupts and never returned to idle (BUG-6).  Rather than silently
-      // queueing behind leftover computation, recover or fail fast.
+      // interrupts and never returned to idle (BUG-6). Rather than silently
+      // queueing behind leftover computation, recover or fail fast. Checked
+      // under the lock, so it sees the state the prior cell left behind.
       if (kernel.status === "busy") {
         if (this.config.timeoutRestartKernel) {
           await this.restartKernel("kernel was still busy after a previous timeout");
@@ -159,7 +191,9 @@ export class RemoteSession implements Session {
       partial.outputs = [
         {
           outputType: "error",
-          ename: isTimeout ? "TimeoutError" : "ShimError",
+          // Use the real error class name (e.g. KernelInterruptedError) so the
+          // model sees a precise cause instead of a blanket "ShimError" (BUG-7).
+          ename: isTimeout ? "TimeoutError" : (err as Error).name || "ShimError",
           evalue: (err as Error).message,
           traceback: [(err as Error).stack ?? (err as Error).message],
         },
@@ -280,9 +314,33 @@ export class RemoteSession implements Session {
   }
 
   private async install(packages: string[]): Promise<void> {
+    // Serialize with running cells on the same kernel (BUG-7).
+    await this.withKernelLock(() => this.runInstall(packages));
+  }
+
+  private async runInstall(packages: string[]): Promise<void> {
     const kernel = this.requireKernel();
     const code = buildInstallCode(packages, this.language);
     if (!code) return;
+    // Fail fast when the package repo is unreachable, instead of letting the
+    // install block on the network until installTimeoutMs (BUG-8). R only;
+    // %pip already surfaces a quick, readable network error.
+    const probe = installProbeCode(this.language);
+    if (probe) {
+      const outcome = await kernel.execute(probe, {
+        timeoutMs: Math.min(30_000, this.config.installTimeoutMs),
+        silent: true,
+      });
+      const stdout = outcome.outputs
+        .filter((o) => o.outputType === "stream" && o.text)
+        .map((o) => o.text!)
+        .join("\n");
+      // A hard probe error (e.g. warn=2 promoted the connection failure) or an
+      // explicit FALSE both mean the repo cannot be reached.
+      if (outcome.status !== "ok" || !isRepoReachable(stdout)) {
+        throw new RepoUnreachableError(R_CRAN_REPO);
+      }
+    }
     const outcome = await kernel.execute(code, { timeoutMs: this.config.installTimeoutMs });
     // `%pip` / install.packages failures must surface — never report success
     // on a failed or errored install (BUG-1).

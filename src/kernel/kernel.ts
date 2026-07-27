@@ -13,7 +13,7 @@
  */
 import { type Kernel, KernelMessage, type Session } from "@jupyterlab/services";
 import { dedupeImages } from "../domain/output";
-import { type JsOutput, TimeoutError } from "../domain/types";
+import { type JsOutput, KernelInterruptedError, TimeoutError } from "../domain/types";
 import { fromIOPub } from "./convert";
 import type { ExecuteOptions, ExecuteOutcome, KernelPort } from "./port";
 
@@ -82,7 +82,7 @@ export class JupyterKernel implements KernelPort {
         // not silently queue behind leftover computation (BUG-6).
         await this.waitIdle(TIMEOUT_SETTLE_MS);
       }
-      throw err;
+      throw translateExecuteError(err);
     } finally {
       clearTimeout(timer);
       future.dispose();
@@ -191,4 +191,23 @@ function raceTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
       setTimeout(() => reject(new TimeoutError()), ms),
     ),
   ]);
+}
+
+/**
+ * Map opaque client-library failures onto domain errors (BUG-7).
+ *
+ * jupyterlab rejects a pending shell future with `"Canceled future for
+ * execute_request message before replies were done"` when the future is
+ * disposed before its execute_reply arrives — i.e. an interrupt (the SIGINT we
+ * fire on timeout) or a dropped kernel/WebSocket connection canceled the
+ * request. Surface that as a readable KernelInterruptedError instead of
+ * leaking the raw client string up to the model.
+ */
+function translateExecuteError(err: unknown): Error {
+  if (err instanceof TimeoutError) return err;
+  const msg = (err as Error)?.message ?? "";
+  if (msg.includes("Canceled future for execute_request")) {
+    return new KernelInterruptedError();
+  }
+  return err as Error;
 }

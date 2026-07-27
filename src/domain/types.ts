@@ -133,3 +133,36 @@ export class TimeoutError extends Error {
     this.name = "TimeoutError";
   }
 }
+
+/**
+ * Thrown when the kernel's execute_reply never arrives because the underlying
+ * future was canceled — e.g. an interrupt (SIGINT) fired by a concurrent or
+ * preceding timeout, or the kernel/WebSocket dropping mid-execution.
+ * Translated from jupyterlab's opaque `"Canceled future for execute_request
+ * message before replies were done"` so callers can surface a readable error
+ * instead of the raw client-library string (BUG-7).
+ */
+export class KernelInterruptedError extends Error {
+  constructor(
+    message = "kernel execution was interrupted before it replied (an interrupt " +
+      "or a dropped connection canceled the request)",
+  ) {
+    super(message);
+    this.name = "KernelInterruptedError";
+  }
+}
+
+/**
+ * Thrown by the pre-install reachability probe when the package repository
+ * (CRAN for R) cannot be reached from the remote kernel, so the install fails
+ * fast with a clear message instead of hanging until `installTimeoutMs` (BUG-8).
+ */
+export class RepoUnreachableError extends Error {
+  constructor(repo: string) {
+    super(
+      `cannot reach the package repository ${repo} from the remote kernel — ` +
+        "check the remote host's network/proxy, or use a reachable mirror",
+    );
+    this.name = "RepoUnreachableError";
+  }
+}
