@@ -19,12 +19,17 @@ rationale and the lessons carried over from v1.
 ## Quick start
 
 ```bash
+pi install git:github.com/Limour-dev/pi-jupyter
+```
+
+Then set the environment variables:
+
+```bash
 export JUPYTER_REMOTE_URL=http://192.168.105.1:57002
 export JUPYTER_REMOTE_TOKEN=123456
 ```
 
-Then install the extension into pi (or run `/reload` during development).
-Optional config file: `~/.jupyter-remote-shim/config.json`
+Optional config file: `~/.pi-jupyter/config.json`
 (see [`config.example.json`](./config.example.json)). Env vars win over the file.
 
 | Env var | Default | Meaning |

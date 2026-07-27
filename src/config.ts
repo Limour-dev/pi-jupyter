@@ -9,7 +9,7 @@
  *   export JUPYTER_REMOTE_URL=http://192.168.105.1:57002
  *   export JUPYTER_REMOTE_TOKEN=123456
  *
- * Optional config file: ~/.jupyter-remote-shim/config.json
+ * Optional config file: ~/.pi-jupyter/config.json
  *   { "url": "...", "token": "...", "kernelName": "python3", ... }
  */
 import { readFileSync } from "node:fs";
@@ -29,7 +29,7 @@ const CONFIG_HINT =
   "[pi-jupyter] Remote Jupyter Server is not configured.\n" +
   "  export JUPYTER_REMOTE_URL=http://host:port      # e.g. http://192.168.105.1:57002\n" +
   "  export JUPYTER_REMOTE_TOKEN=<your-token>\n" +
-  'Optional: ~/.jupyter-remote-shim/config.json with {"url","token","kernelName"}.';
+  'Optional: ~/.pi-jupyter/config.json with {"url","token","kernelName"}.';
 
 /**
  * Load config with env > file > default priority.
@@ -39,7 +39,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   let file: Record<string, unknown> = {};
   try {
     file = JSON.parse(
-      readFileSync(join(homedir(), ".jupyter-remote-shim", "config.json"), "utf-8"),
+      readFileSync(join(homedir(), ".pi-jupyter", "config.json"), "utf-8"),
     ) as Record<string, unknown>;
   } catch {
     /* no config file — env vars only */
