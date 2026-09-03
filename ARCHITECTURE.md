@@ -156,14 +156,18 @@ and the file's kernel is a warning, not an override). `Session.contentsPath`
 and `Session.listCells()` (restored + run cells, in document order) let the
 tool layer tell the agent exactly what is there and what to re-run.
 
-### Re-running restored cells happens IN PLACE
+### Re-running identical code happens IN PLACE
 
-`runCell` first looks for a still-`restored` code slot whose source matches;
-if found, the execution lands back in THAT slot (same cell id, outputs
-replaced, `raw` dropped so the fresh result serializes) — the notebook keeps
-one copy per logical cell, like JupyterLab. Non-matching code appends a new
-code slot. So resuming a file with a fresh kernel and re-running the setup
-cells does not duplicate the document.
+`runCell` re-executes IN PLACE whenever the document already holds a code cell
+whose source equals the executed code — a restored file cell AND a cell run
+earlier in this session alike. The execution lands back in THAT slot (same
+cell id, outputs replaced; a restored slot drops its verbatim `raw` so the
+fresh result serializes), and the match repeats on every identical re-run:
+re-running the same code never duplicates the cell, so the notebook keeps one
+copy per logical cell, like JupyterLab. Only code that matches no existing
+cell appends a new code slot. Resuming a file with a fresh kernel and
+re-running the setup cells therefore does not duplicate the document — and
+neither does re-running any cell twice within a live session.
 
 ### Kernel lifecycle: keep-alive for named notebooks (default)
 

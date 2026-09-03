@@ -66,6 +66,7 @@ function makeServerPort(kernel: KernelPort): ServerPort & {
   connectToSession: ReturnType<typeof vi.fn>;
   readNotebook: ReturnType<typeof vi.fn>;
   uploadNotebook: ReturnType<typeof vi.fn>;
+  shutdownSession: ReturnType<typeof vi.fn>;
 } {
   return {
     ping: vi.fn().mockResolvedValue(undefined),
@@ -76,6 +77,7 @@ function makeServerPort(kernel: KernelPort): ServerPort & {
     connectToSession: vi.fn().mockResolvedValue(kernel),
     readNotebook: vi.fn().mockResolvedValue(null),
     uploadNotebook: vi.fn().mockResolvedValue(undefined),
+    shutdownSession: vi.fn().mockResolvedValue(undefined),
     dispose: vi.fn(),
   };
 }
@@ -951,6 +953,43 @@ describe("RemoteSession — resume (continue an existing notebook path)", () => 
     expect(model.cells[1].execution_count).toBe(5);
     // the loaded cell is no longer "restored"
     expect(s.listCells()[0].restored).toBe(false);
+  });
+
+  it("re-running a restored cell AGAIN stays IN PLACE (issue 1: cell was triplicated)", async () => {
+    server.readNotebook.mockResolvedValue(FILE_NB());
+    const s = new RemoteSession(server, CONFIG, { contentsPath: "notes/pi.ipynb" });
+    await s.resume("notes/pi.ipynb");
+    // First identical re-run → in place (file cell id kept).
+    const first = await s.runCell("import numpy as np");
+    expect(first.cellId).toBe("cell-a");
+    // Second identical re-run → the SAME cell again, never a new duplicate.
+    const second = await s.runCell("import numpy as np");
+    expect(second.cellId).toBe("cell-a");
+    expect(second.cellId).toBe(first.cellId);
+    // Third too — matching is not consumed after the first re-run.
+    const third = await s.runCell("import numpy as np");
+    expect(third.cellId).toBe("cell-a");
+    expect(s.listCells()).toHaveLength(1); // markdown is not a code cell
+    await s.flushAutoSave();
+    const model = server.uploadNotebook.mock.calls.at(-1)?.[1] as { cells: any[] };
+    // markdown + the ONE code cell — never triplicated.
+    expect(model.cells).toHaveLength(2);
+    expect(model.cells.filter((c: any) => c.cell_type === "code")).toHaveLength(1);
+  });
+
+  it("re-running identical code in a LIVE session updates in place (issue 1: no duplicate cell)", async () => {
+    const s = new RemoteSession(server, CONFIG, { notebookId: "nb-live" });
+    await s.initialize();
+    const first = await s.runCell("x = 1");
+    const second = await s.runCell("x = 1");
+    expect(second.cellId).toBe(first.cellId); // same cell, not a fresh one
+    expect(s.listCells()).toHaveLength(1);
+    // different code still appends a new cell
+    await s.runCell("y = 2");
+    expect(s.listCells()).toHaveLength(2);
+    await s.flushAutoSave();
+    const model = server.uploadNotebook.mock.calls.at(-1)?.[1] as { cells: any[] };
+    expect(model.cells.filter((c: any) => c.cell_type === "code")).toHaveLength(2);
   });
 
   it("detach() keeps the kernel running (no shutdown) and disposes the client", async () => {

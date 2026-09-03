@@ -100,8 +100,9 @@ agent: jupyter_repl(notebook="notes/pi.ipynb", code="...")   # keep passing the 
   *bound to the same path* and the file's existing cells are loaded into the
   document (markdown/raw cells preserved verbatim). Variables were not kept —
   the open result lists the code cells so the agent re-runs the setup ones;
-  re-running a cell whose source matches a loaded cell executes it **in place**
-  (same cell id, no duplicates), like JupyterLab.
+  re-running a cell whose source matches an existing cell (loaded from the file
+  or run earlier this session) executes it **in place** — same cell id, no
+  duplicates, like JupyterLab — so re-runs never pile up copies of the same code.
 - **Local file → import.** `jupyter_open_notebook(local_file="./x.ipynb")`
   uploads the file to the server (under its file name) and continues it there.
 - What pi has opened is remembered in `~/.pi-jupyter/notebooks.json`

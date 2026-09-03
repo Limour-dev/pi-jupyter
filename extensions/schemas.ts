@@ -37,7 +37,7 @@ export const JUPYTER_PARAMS = Type.Object({
   notebook: NOTEBOOK,
   code: Type.String({
     description:
-      "Python source to execute in the persistent remote notebook session. Use print(...) for side effects; the last expression's repr is returned as the result. To re-run a cell restored from an existing notebook, pass its exact source — it executes in place (same cell id) instead of appending a duplicate.",
+      "Python source to execute in the persistent remote notebook session. Use print(...) for side effects; the last expression's repr is returned as the result. Re-running code whose source matches an existing cell (loaded from the file or run earlier this session) executes IN PLACE — same cell id, outputs replaced, never a duplicate. Different code appends a new cell.",
   }),
   dependencies: Type.Optional(
     Type.Array(Type.String(), {

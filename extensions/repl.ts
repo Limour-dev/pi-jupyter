@@ -668,7 +668,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     promptGuidelines: [
       "In a NEW conversation, when the user wants to continue earlier work, list candidates with jupyter_list_notebooks (or ask which file), then open the chosen path here.",
       "If the result says 'attached', the previous kernel is still running — variables/imports are intact, just keep working.",
-      "If it says 'started'/'created', a NEW kernel was started: in-memory variables were NOT preserved. The result lists the file's code cells; re-run the setup cells with jupyter_repl (passing this notebook path) to rebuild state. Re-running a cell whose source exactly matches a loaded cell executes it IN PLACE — the notebook keeps one copy, like JupyterLab.",
+      "If it says 'started'/'created', a NEW kernel was started: in-memory variables were NOT preserved. The result lists the file's code cells; re-run the setup cells with jupyter_repl (passing this notebook path) to rebuild state. Re-running code whose source matches an existing cell (loaded from the file or run earlier this session) executes it IN PLACE — same cell id, outputs replaced — so the notebook keeps one copy per logical cell, like JupyterLab. Identical re-runs never duplicate, whether the cell was just loaded or just run.",
       "Then keep passing the same `notebook` path on jupyter_repl / jupyter_add_dependencies / jupyter_save_notebook calls.",
     ],
     parameters: OPEN_NOTEBOOK_PARAMS,
@@ -767,21 +767,54 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_shutdown_notebook",
     label: "Shut Down Notebook Kernel",
     description:
-      "Shut down a notebook's kernel: kill the kernel and drop its session row on the server (the .ipynb file stays on the server; it can be resumed later, but with a fresh kernel and no in-memory variables). Use /jupyter-reset to shut down everything.",
+      "Shut down a notebook's kernel: kill the kernel and drop its session row on the server (the .ipynb file stays on the server; it can be resumed later, but with a fresh kernel and no in-memory variables). The path may be a notebook open in this conversation OR any LIVE kernel bound to that path on the server — including an anonymous kernel session auto-materialized as remote-<id>.ipynb by a kernel-only jupyter_repl. Use /jupyter-reset to shut down everything.",
     promptSnippet:
-      "jupyter_shutdown_notebook: kill one notebook's kernel (file stays, resume restarts a fresh kernel).",
+      "jupyter_shutdown_notebook: kill one notebook's kernel (open here or live on the server; the file stays, resume restarts a fresh kernel).",
     parameters: SHUTDOWN_NOTEBOOK_PARAMS,
     async execute(_toolCallId, params: ShutdownNotebookParams) {
       const path = normalizeContentsPath(params.path);
-      const sess = sessionsByPath.get(path);
-      if (!sess) throw new Error(`[pi-jupyter] notebook ${path} is not open in this conversation.`);
-      await sess.shutdown();
-      sessionsByPath.delete(path);
-      execCounts.delete(sess.kernelName);
-      return {
-        content: [{ type: "text", text: `Kernel serving ${path} shut down (file kept; a future open resumes it with a fresh kernel).` }],
-        details: { path, kernel: sess.kernelName },
+      // Drop a session from whichever map holds it (named path or anonymous
+      // per-kernel) once its kernel is gone, so cleanup never runs twice.
+      const removeSession = (sess: Session) => {
+        for (const [p, s] of sessionsByPath) if (s === sess) sessionsByPath.delete(p);
+        for (const [kernel, s] of sessionsByKernel) if (s === sess) sessionsByKernel.delete(kernel);
+        execCounts.delete(sess.kernelName);
       };
+      // (1) Open in THIS conversation: a named notebook session at the path,
+      // OR an anonymous kernel-only session whose auto-save target IS that
+      // path (jupyter_repl without `notebook` materializes remote-<id>.ipynb).
+      const local =
+        sessionsByPath.get(path) ??
+        [...sessionsByKernel.values()].find((s) => s.contentsPath === path);
+      if (local) {
+        const kernel = local.kernelName;
+        await local.shutdown();
+        removeSession(local);
+        return {
+          content: [{ type: "text", text: `Kernel serving ${path} shut down (file kept; a future open resumes it with a fresh kernel).` }],
+          details: { path, kernel, target: "this-conversation" },
+        };
+      }
+      // (2) A LIVE kernel bound to `path` that this conversation never opened
+      // — left by an earlier conversation (detach), a browser tab, or an
+      // auto-materialized anonymous session. Kill it server-side.
+      const probe = new JupyterServer(config);
+      try {
+        const live = await probe.findLiveSession(path);
+        if (!live) {
+          throw new Error(
+            `[pi-jupyter] no kernel is currently running for ${path} — nothing to shut down. ` +
+              "The file (if any) is kept; jupyter_open_notebook can resume it later with a fresh kernel.",
+          );
+        }
+        await probe.shutdownSession(live);
+        return {
+          content: [{ type: "text", text: `Kernel serving ${path} shut down on the server (file kept; a future open resumes it with a fresh kernel).` }],
+          details: { path, kernel: live.kernelName, target: "server" },
+        };
+      } finally {
+        try { probe.dispose(); } catch { /* ignore */ }
+      }
     },
   });
   // ── jupyter_repl ─────────────────────────────────────────────────────────

@@ -319,15 +319,18 @@ export class RemoteSession implements Session {
   /** The actual cell execution; always runs under the kernel lock. */
   private async executeCell(source: string, opts: RunCellOpts): Promise<CellResult> {
     let kernel = this.requireKernel();
-    // In-place re-run: a restored file cell whose source matches is executed
-    // back into ITS slot (like JupyterLab re-running a cell) instead of
-    // appending a duplicate. Only the first still-restored match is targeted;
-    // identical code run again appends a new cell.
-    const restoreTarget = this.slots.find(
+    // In-place re-run (like JupyterLab): when the document already holds a code
+    // cell whose source equals this one, the execution lands back in THAT cell —
+    // same cell id, outputs replaced — instead of appending a duplicate. The
+    // match is by source over ANY code cell (restored from the file OR run
+    // earlier in this session), first in document order, so re-running identical
+    // code always updates the same cell and never duplicates it. Code that
+    // matches no existing cell appends a new one.
+    const inPlaceTarget = this.slots.find(
       (s): s is Extract<NotebookSlot, { kind: "code" }> =>
-        s.kind === "code" && s.restored && s.source === source,
+        s.kind === "code" && s.source === source,
     );
-    const cellId = restoreTarget?.cellId ?? `cell-${randomUUID().slice(0, 8)}`;
+    const cellId = inPlaceTarget?.cellId ?? `cell-${randomUUID().slice(0, 8)}`;
     const executionId = `exec-${randomUUID().slice(0, 8)}`;
     const timeoutMs = opts.timeoutMs ?? this.config.defaultTimeoutMs;
 
@@ -387,12 +390,14 @@ export class RemoteSession implements Session {
       ];
     }
 
-    if (restoreTarget) {
-      // The restored slot now carries THIS kernel's result; from here on the
-      // cell serializes from the fresh record, not the stale file raw.
-      restoreTarget.result = partial;
-      restoreTarget.restored = false;
-      restoreTarget.raw = undefined;
+    if (inPlaceTarget) {
+      // The targeted cell (restored or run earlier this session) now carries
+      // THIS kernel's result. A restored slot drops its verbatim `raw` so the
+      // fresh record serializes from here on; an already-live slot just gets
+      // its result replaced — the cell keeps its id and document position.
+      inPlaceTarget.result = partial;
+      inPlaceTarget.restored = false;
+      inPlaceTarget.raw = undefined;
     } else {
       this.slots.push({ kind: "code", cellId, source, result: partial, restored: false });
     }

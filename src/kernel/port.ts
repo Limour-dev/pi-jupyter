@@ -115,5 +115,14 @@ export interface ServerPort {
    * a non-ok response; the caller by-passes the failure.
    */
   uploadNotebook(contentsPath: string, model: Record<string, unknown>): Promise<void>;
+  /**
+   * Shut down a LIVE server-side session by its model row (DELETE
+   * /api/sessions/<id>): kills its kernel and drops the session row. The
+   * notebook FILE at `model.path` stays on the server. Used by
+   * `jupyter_shutdown_notebook` for kernels this conversation never opened
+   * (left running by an earlier conversation, the browser, or an
+   * auto-materialized anonymous session).
+   */
+  shutdownSession(model: ServerSessionModel): Promise<void>;
   dispose(): void;
 }

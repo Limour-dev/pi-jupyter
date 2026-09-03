@@ -167,6 +167,14 @@ export class JupyterServer implements ServerPort {
     return new JupyterKernel(k, session);
   }
 
+  async shutdownSession(model: ServerSessionModel): Promise<void> {
+    // DELETE /api/sessions/<id> — kills the kernel and drops the session row.
+    // A 404 (row already gone) is handled internally by the library (warn, no
+    // throw); any other non-204 surfaces as a ResponseError here.
+    const mgr = this.ensureSessionManager();
+    await mgr.shutdown(model.id);
+  }
+
   async readNotebook(contentsPath: string): Promise<Record<string, unknown> | null> {
     const url = `${this.settings.baseUrl}api/contents/${encodeContentsPath(contentsPath)}`;
     const res = await ServerConnection.makeRequest(url, { method: "GET" }, this.settings);
