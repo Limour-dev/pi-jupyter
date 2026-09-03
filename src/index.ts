@@ -5,7 +5,7 @@
  *
  *   domain/   pure logic, zero external deps   (types, output, notebook, deps, bootstrap, subject)
  *   kernel/   @jupyterlab/services adapters    (port, convert, kernel, server)
- *   config    env > file > default
+ *   config    server connection only (url/token); the kernel is agent-decided per call
  *   session   Session impl behind KernelPort
  */
 
@@ -35,6 +35,7 @@ export { JupyterKernel } from "./kernel/kernel";
 export { JupyterServer } from "./kernel/server";
 export { fromIOPub } from "./kernel/convert";
 
-// ── config + session ────────────────────────────────────────────────────────
+// ── config + session + purpose notes ───────────────────────────────────────
 export { isConfigured, loadConfig, type ShimConfig } from "./config";
+export { loadPurposes, savePurposes, purposesFilePath, type KernelPurposes } from "./purposes";
 export { RemoteSession } from "./session";

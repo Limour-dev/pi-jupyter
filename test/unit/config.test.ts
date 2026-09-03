@@ -31,7 +31,8 @@ describe("loadConfig", () => {
 
   it("applies defaults for optional fields", () => {
     const cfg = loadConfig(BASE);
-    expect(cfg.kernelName).toBe("python3");
+    // The kernel is agent-decided, NOT configured: no default.
+    expect(cfg.kernelName).toBeUndefined();
     expect(cfg.tlsInsecure).toBe(false);
     expect(cfg.defaultTimeoutMs).toBe(300_000);
     expect(cfg.installTimeoutMs).toBe(600_000);

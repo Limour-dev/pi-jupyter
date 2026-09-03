@@ -45,6 +45,8 @@ const FLUSH_TIMEOUT_MS = 30_000;
 
 export class RemoteSession implements Session {
   readonly notebookId: string;
+  /** Kernel (kernelspec name) this session runs on — agent-decided. */
+  readonly kernelName: string;
 
   /** Side-channel notified after every remote auto-save attempt (FR-6.2). */
   onAutoSave?: (event: AutoSaveEvent) => void;
@@ -97,6 +99,9 @@ export class RemoteSession implements Session {
   ) {
     this.notebookId =
       opts.notebookId ?? `remote-${Date.now()}-${randomUUID().slice(0, 8)}`;
+    // The kernel is chosen by the agent per call (ARCHITECTURE.md);
+    // config.kernelName is only the optional fallback default.
+    this.kernelName = opts.kernelName ?? config.kernelName ?? "";
     for (const d of opts.dependencies ?? []) this.deps.add(d.trim());
   }
 
@@ -107,6 +112,13 @@ export class RemoteSession implements Session {
 
   /** Connect to the server, start a kernel, bootstrap, and pre-install deps. */
   async initialize(): Promise<void> {
+    if (!this.kernelName) {
+      throw new Error(
+        "[pi-jupyter] no kernel selected for this session. The agent " +
+          'should pick a kernel from `jupyter_list_kernels` and pass it as the ' +
+          "`kernel` parameter (a kernelspec name like \"python3\" or \"ir\").",
+      );
+    }
     await this.server.ping();
     // Validate kernelName against the server's kernelspecs *before* starting,
     // so a typo (or a display name like "R" instead of "ir") fails with a
@@ -115,7 +127,7 @@ export class RemoteSession implements Session {
     // effectivePath is the single source of truth shared by the bind-session
     // row and the remote auto-save target (INV-1).
     this.effectivePath = this.computeEffectivePath();
-    this.kernel = await this.server.startKernel(this.config.kernelName, {
+    this.kernel = await this.server.startKernel(this.kernelName, {
       sessionPath: this.effectivePath,
       sessionName: this.notebookId,
     });
@@ -336,9 +348,9 @@ export class RemoteSession implements Session {
   }
 
   /**
-   * Fetch the kernelspec for `config.kernelName`, validating it exists (UX-7).
-   * Returns null when the server cannot list specs — we then degrade to the
-   * old behavior and let `startKernel` fail on its own.
+   * Fetch the kernelspec for `kernelName` (the agent-chosen kernel), validating
+   * it exists (UX-7). Returns null when the server cannot list specs — we then
+   * degrade to the old behavior and let `startKernel` fail on its own.
    */
   private async resolveKernelSpec(): Promise<KernelSpecInfo | null> {
     let list: KernelSpecList;
@@ -347,8 +359,8 @@ export class RemoteSession implements Session {
     } catch {
       return null;
     }
-    const spec = list.specs.find((s) => s.name === this.config.kernelName);
-    if (!spec) throw new Error(formatKernelSpecMismatch(this.config.kernelName, list));
+    const spec = list.specs.find((s) => s.name === this.kernelName);
+    if (!spec) throw new Error(formatKernelSpecMismatch(this.kernelName, list));
     return spec;
   }
 
@@ -440,8 +452,8 @@ export class RemoteSession implements Session {
   private notebookMeta(): NotebookMeta {
     const spec = this.kernelSpec;
     return {
-      kernelName: spec?.name ?? this.config.kernelName,
-      displayName: spec?.displayName ?? this.config.kernelName,
+      kernelName: spec?.name ?? this.kernelName,
+      displayName: spec?.displayName ?? this.kernelName,
       language: this.language,
     };
   }
@@ -563,7 +575,7 @@ export class RemoteSession implements Session {
       }
       old.dispose();
     }
-    this.kernel = await this.server.startKernel(this.config.kernelName, {
+    this.kernel = await this.server.startKernel(this.kernelName, {
       sessionPath: this.effectivePath ?? `${this.notebookId}.ipynb`,
       sessionName: this.notebookId,
     });

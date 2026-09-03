@@ -19,11 +19,14 @@ async function main() {
   console.log("1. Loading config...");
   const config = loadConfig();
   console.log(`   ✓ url: ${config.url}`);
-  console.log(`   ✓ kernel: ${config.kernelName}\n`);
+  // The kernel is agent-decided per call; the script pins one explicitly
+  // instead of relying on config.
+  const kernel = config.kernelName ?? "python3";
+  console.log(`   ✓ kernel: ${kernel}\n`);
 
   console.log("2. Creating remote session...");
   const server = new JupyterServer(config);
-  const session = new RemoteSession(server, config, { peerLabel: "smoke-test" });
+  const session = new RemoteSession(server, config, { kernelName: kernel, peerLabel: "smoke-test" });
   await session.initialize();
   console.log(`   ✓ notebookId: ${session.notebookId}`);
   console.log(`   ✓ status: ${JSON.stringify(await session.getRuntimeStatus())}\n`);
@@ -99,7 +102,7 @@ async function main() {
   console.log("\n10. Sub-directory target (IT-3: remoteSavePath auto-creates dirs)...");
   const subConfig = { ...config, remoteSavePath: `pi-test-${Date.now()}/auto.ipynb` };
   const subServer = new JupyterServer(subConfig);
-  const subSession = new RemoteSession(subServer, subConfig, { peerLabel: "smoke-subdir" });
+  const subSession = new RemoteSession(subServer, subConfig, { kernelName: kernel, peerLabel: "smoke-subdir" });
   await subSession.initialize();
   await subSession.runCell("z = 7");
   await subSession.flushAutoSave();

@@ -70,6 +70,12 @@ export type ObservableLike<T> = {
 
 export type CreateSessionOpts = {
   runtime?: string;
+  /**
+   * The kernel (kernelspec name, e.g. "python3" / "ir") this session runs on.
+   * The agent picks it per call (ARCHITECTURE.md); when omitted, RemoteSession
+   * falls back to `ShimConfig.kernelName`.
+   */
+  kernelName?: string;
   workingDir?: string;
   peerLabel?: string;
   description?: string;
@@ -108,6 +114,8 @@ export type AutoSaveInfo = {
  */
 export interface Session {
   readonly notebookId: string;
+  /** Kernel (kernelspec name) this session runs on, as decided by the agent. */
+  readonly kernelName: string;
   runCell(code: string, opts?: RunCellOpts): Promise<CellResult>;
   addDependencies(packages: string[]): Promise<void>;
   /**

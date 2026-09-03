@@ -1,8 +1,9 @@
 # pi-jupyter v2 — Architecture
 
 > A remote Jupyter-backed REPL for pi coding agents. Pure TypeScript,
-> no local backend — the remote Jupyter Server **is** the backend, reached via
-> the official `@jupyterlab/services` client.
+> no local daemon — code runs on a remote Jupyter Server, reached via
+> the official `@jupyterlab/services` client. Which kernel executes the code
+> (python3, ir, …) is picked by the agent per call (§ below).
 
 ## Design philosophy
 
@@ -62,6 +63,54 @@ lifecycle is testable with a 20-line mock — see
 single owner of the `IFuture` protocol, every output-normalization branch is
 covered offline with a mock future — see `test/unit/kernel.test.ts`. Both
 were impossible in v1.
+
+## Who decides the kernel?
+
+Two things are easy to conflate, and v2 separates them sharply:
+
+- **The Jupyter Server connection** (url/token) is *user configuration*. It is
+  the only thing `src/config.ts` requires (`JUPYTER_REMOTE_URL` /
+  `JUPYTER_REMOTE_TOKEN`, env or `~/.pi-jupyter/config.json`).
+- **Which kernel executes the code** (python3, ir, …) is an *agent decision*
+  per tool call, **not** configuration.
+
+Flow (see `extensions/repl.ts`):
+
+1. `jupyter_list_kernels` connects to the configured server, reads
+   `/api/kernelspecs` (`ServerPort.listKernelSpecs`) and shows the agent the
+   available kernels — each annotated with its recorded purpose (from
+   `~/.pi-jupyter/purposes.json`) plus the server default and any open
+   session. Kernels without a recorded purpose are flagged as new.
+2. **Only a newly discovered kernel with no recorded purpose** triggers a
+   question: the agent asks the user what it is for and stores the answer
+   with `jupyter_set_kernel_purpose` → `src/purposes.ts` writes
+   `~/.pi-jupyter/purposes.json` (`{ name: purpose }`, atomic replace).
+   Already-recorded kernels are shown with their purpose and reused — no
+   re-asking, in this session or later ones.
+3. The agent passes the matching kernelspec *name* as the `kernel` parameter
+   of `jupyter_repl` / `jupyter_add_dependencies` / `jupyter_save_notebook`.
+
+Consequences encoded in the code:
+
+- `ShimConfig.kernelName` is optional and is **only a fallback default** for
+  calls that omit `kernel` (default → server default kernelspec → `python3`).
+  It never overrides an explicit agent choice.
+- Sessions are keyed **per kernel** (`Map<kernelName, Session>` in the
+  extension): each kernel runs its own `RemoteSession` (own kernel, own
+  notebookId, own auto-save target), so switching python3 ↔ R back and forth
+  never loses either kernel's state.
+- `RemoteSession` receives the chosen kernel via `CreateSessionOpts.kernelName`
+  and exposes it as `Session.kernelName` (surfaced in every tool result's
+  `details.kernel`), so the agent can see which kernel actually ran. A
+  session constructed with no kernel at all fails fast with a "no kernel
+  selected" error before touching the network.
+- `jupyter_list_kernels` works with a throwaway `JupyterServer` instance, so
+  listing never interferes with live sessions.
+- Purpose notes live in a tiny JSON store (`src/purposes.ts`,
+  `~/.pi-jupyter/purposes.json`), read by `jupyter_list_kernels` and written
+  by `jupyter_set_kernel_purpose`. The store only carries the user's
+  EXPLANATION — it never selects a kernel, so the agent's per-call decision
+  (step 3) stays the single source of truth.
 
 ## Decisions carried over from v1 (and why)
 

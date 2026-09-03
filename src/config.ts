@@ -10,7 +10,13 @@
  *   export JUPYTER_REMOTE_TOKEN=123456
  *
  * Optional config file: ~/.pi-jupyter/config.json
- *   { "url": "...", "token": "...", "kernelName": "python3", ... }
+ *   { "url": "...", "token": "...", ... }
+ *
+ * The kernel that executes the code (python3 / ir / …) is NOT configured
+ * here — the agent discovers the kernels on the server itself
+ * (`jupyter_list_kernels`) and picks one per call via the `kernel`
+ * parameter. `kernelName` below is kept ONLY as an optional fallback default
+ * for tool calls that omit `kernel`; it never overrides the agent's choice.
  *
  * Optional extras: JUPYTER_WORKING_DIR (base for relative save paths) and
  * JUPYTER_TIMEOUT_RESTART_KERNEL=1 (auto-restart a kernel still busy after a
@@ -23,7 +29,12 @@ import { join } from "node:path";
 export interface ShimConfig {
   url: string;
   token: string;
-  kernelName: string;
+  /**
+   * Optional fallback default kernel (kernelspec name) when a tool call
+   * omits `kernel`. The agent decides the kernel per call (see ARCHITECTURE.md);
+   * when unset we fall back to the server's default kernelspec.
+   */
+  kernelName?: string;
   tlsInsecure: boolean;
   defaultTimeoutMs: number;
   installTimeoutMs: number;
@@ -43,7 +54,7 @@ export const CONFIG_HINT =
   "[pi-jupyter] Remote Jupyter Server is not configured.\n" +
   "  export JUPYTER_REMOTE_URL=http://host:port      # e.g. http://192.168.105.1:57002\n" +
   "  export JUPYTER_REMOTE_TOKEN=<your-token>\n" +
-  'Optional: ~/.pi-jupyter/config.json with {"url","token","kernelName"}.';
+  'Optional: ~/.pi-jupyter/config.json with {"url","token"}.';
 
 /**
  * Load config with env > file > default priority.
@@ -72,8 +83,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   return {
     url,
     token,
-    kernelName:
-      env.JUPYTER_KERNEL_NAME ?? (file.kernelName as string | undefined) ?? "python3",
+    // The kernel is the AGENT's decision (ARCHITECTURE.md); env/file values are
+    // only an optional fallback when a tool call omits `kernel`.
+    kernelName: nonEmpty(
+      env.JUPYTER_KERNEL_NAME ?? (file.kernelName as string | undefined),
+    ),
     tlsInsecure:
       env.JUPYTER_REMOTE_TLS_INSECURE === "1" || file.tlsInsecure === true,
     defaultTimeoutMs:

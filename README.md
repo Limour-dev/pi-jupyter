@@ -1,7 +1,7 @@
 # pi-jupyter v2
 
 Run code (Python, R, …) on a **remote Jupyter Server** from inside the pi coding agent.
-Pure TypeScript, no local backend — the remote server *is* the backend.
+Pure TypeScript, no local daemon — code runs on a remote Jupyter Server via `@jupyterlab/services`.
 
 This is a ground-up refactor of v1 around a hexagonal (ports & adapters)
 architecture. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the design
@@ -10,10 +10,11 @@ rationale and the lessons carried over from v1.
 ## Features
 
 - `jupyter_repl` — persistent remote Jupyter kernel; state survives between calls
-- `jupyter_add_dependencies` — hot-install packages (`%pip` / `install.packages`, no restart)
-- `jupyter_save_notebook` — export the session as a valid `.ipynb`
+- `jupyter_list_kernels` — discover the kernels (python3, ir, …) on the server; shows each kernel's recorded purpose and flags new ones with none
+- `jupyter_set_kernel_purpose` — persist the user's explanation of what a kernel is for (across sessions)
+- `jupyter_save_notebook` — export a session as a valid `.ipynb`
 - **Remote auto-save** — after every cell, the notebook snapshot is uploaded to the remote server (remote `$HOME` by default), so the *same kernel* can be re-opened in a browser
-- `/jupyter-reset` — drop the kernel and start clean
+- `/jupyter-reset` — drop all kernels and start clean
 - Inline matplotlib/PIL images returned to the model
 - Streaming output, execution-timeout interrupt, no orphan kernels on exit
 
@@ -33,11 +34,28 @@ export JUPYTER_REMOTE_TOKEN=123456
 Optional config file: `~/.pi-jupyter/config.json`
 (see [`config.example.json`](./config.example.json)). Env vars win over the file.
 
+### Which kernel runs the code? The agent decides.
+
+The Jupyter Server connection (url/token) is user-configured, but **which
+kernel** executes your code (python3, ir, …) is **not configured** anywhere.
+The agent discovers the kernels itself with `jupyter_list_kernels`, picks the
+matching one per task and passes it as the `kernel` parameter of
+`jupyter_repl` / `jupyter_add_dependencies` / `jupyter_save_notebook`. Each
+kernel keeps its own persistent session, so switching python3 ↔ R never
+loses state.
+
+**What each kernel is for** ("python3 → data wrangling", "ir → statistics") is
+remembered across sessions in `~/.pi-jupyter/purposes.json` (a tiny JSON map
+`{ name: purpose }`, editable by hand too). Only a *newly discovered kernel
+with no recorded purpose* makes the agent ask you once; it then saves your
+answer with `jupyter_set_kernel_purpose`, and every later session shows the
+purpose and auto-selects without re-asking.
+
 | Env var | Default | Meaning |
 |---------|---------|---------|
-| `JUPYTER_REMOTE_URL` | *required* | Server base URL |
-| `JUPYTER_REMOTE_TOKEN` | *required* | Auth token |
-| `JUPYTER_KERNEL_NAME` | `python3` | Kernel spec name |
+| `JUPYTER_REMOTE_URL` | *required* | Server base URL (user-set) |
+| `JUPYTER_REMOTE_TOKEN` | *required* | Auth token (user-set) |
+| `JUPYTER_KERNEL_NAME` | *none* | Optional fallback default kernel only — used when a tool call omits `kernel`; normally the agent picks per call |
 | `JUPYTER_REMOTE_TLS_INSECURE` | off | Skip TLS validation (dev only) |
 | `JUPYTER_REMOTE_TIMEOUT_MS` | `300000` | Per-cell timeout |
 | `JUPYTER_INSTALL_TIMEOUT_MS` | `600000` | `%pip` install timeout |
@@ -46,7 +64,6 @@ Optional config file: `~/.pi-jupyter/config.json`
 | `JUPYTER_BIND_SESSION` | on | Bind the kernel to an `/api/sessions` row so it shows in the Jupyter Running UI (`=0` restores bare-kernel behavior) |
 | `JUPYTER_REMOTE_AUTOSAVE` | on | Upload the notebook snapshot to the remote server after every cell (`=0` disables) |
 | `JUPYTER_REMOTE_SAVE_PATH` | `<notebookId>.ipynb` | Remote contents path for the auto-save, e.g. `notes/pi.ipynb` |
-
 ## Remote auto-save
 
 After every `jupyter_repl` cell (success, error, or timeout alike) the session
@@ -70,13 +87,14 @@ never overwrite a newer one), and failures only produce a warning.
 - `jupyter_save_notebook` is unchanged: it still writes **locally** and is
   independent of the remote auto-save.
 
-## Multiple languages (R and others)
+## Multiple kernels (R and others) — chosen by the agent
 
-The extension is language-aware: the selected kernel's kernelspec drives the
+The extension is language-aware: the chosen kernel's kernelspec drives the
 install command, the bootstrap code, and the metadata of saved notebooks.
 
-`kernelName` must be a kernelspec **name**, not a display name — e.g. `ir`,
-not `R`. List the specs on your server:
+Each `kernel` value must be a kernelspec **name**, not a display name — e.g.
+`ir`, not `R`. Run `jupyter_list_kernels` inside pi (or curl the endpoint
+below) to see what the server offers:
 
 ```bash
 curl -s -H "Authorization: token YOUR-TOKEN" \
@@ -84,16 +102,34 @@ curl -s -H "Authorization: token YOUR-TOKEN" \
   | jq '.kernelspecs | to_entries[] | {name: .key, display: .value.spec.display_name, language: .value.spec.language}'
 ```
 
-If `kernelName` matches no spec, initialization fails with the full list of
-available kernels grouped by language.
+If the chosen `kernel` matches no spec, initialization fails with the full
+list of available kernels grouped by language.
 
-R example (`~/.pi-jupyter/config.json`):
+Typical first-run flow — only the new kernels without a recorded purpose are
+asked about once; later sessions reuse the notes:
+
+```text
+agent: jupyter_list_kernels
+       → python3  (purpose recorded: data wrangling)      # reuse, no question
+       → ir      (purpose: not recorded)  ← NEW
+agent: "What is the ir kernel for?"
+you:   "statistics with R"
+agent: jupyter_set_kernel_purpose(kernel="ir", purpose="statistics with R")
+agent: jupyter_repl(kernel="ir", code="...")           # per-task choice
+```
+
+Notes are stored in `~/.pi-jupyter/purposes.json` and only describe kernels —
+they never select one; the agent still decides per call.
+
+R example — tell the agent the R kernel exists (`kernel: "ir"`), or
+optionally pin it as the fallback default in `~/.pi-jupyter/config.json`
+(`"kernelName": "ir"`); the agent still overrides per call:
 
 ```json
 {
   "url": "http://192.168.105.1:57002",
   "token": "your-token-here",
-  "kernelName": "ir"
+  "kernelName": "ir"   // optional fallback ONLY — the agent picks per call
 }
 ```
 
@@ -115,7 +151,7 @@ Language-specific behavior:
 
 Troubleshooting:
 
-- `kernel "R" not found` — use the spec name (`ir`), not the display name.
+- `kernel "R" not found` — use the spec name (`ir`), not the display name, as the `kernel` value.
 - Save paths: relative paths resolve against the pi working directory; prefer
   absolute paths or `~/`, or set `JUPYTER_WORKING_DIR`.
 
@@ -135,7 +171,8 @@ npm run build                  # tsup → dist/
 src/domain/      pure core, zero external deps  (types, output, notebook, deps, bootstrap, subject)
 src/kernel/      @jupyterlab/services adapters  (port, server, kernel, convert)
 src/session.ts   RemoteSession behind KernelPort
-src/config.ts    env > file > default
+src/config.ts    server connection only (url/token); the kernel is agent-decided per call
+src/purposes.ts   persistent per-kernel purpose notes (~/.pi-jupyter/purposes.json)
 extensions/      pi extension (repl, format, schemas)
 test/unit/       offline vitest suite (mock IFuture + mock KernelPort)
 test/integration live smoke test

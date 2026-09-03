@@ -781,3 +781,37 @@ describe("RemoteSession — poisoned deps set (failed install must not block fut
     await expect(s.syncEnvironment()).resolves.toEqual(["requests"]);
   });
 });
+
+describe("RemoteSession — agent-decided kernel", () => {
+  let kernel: ReturnType<typeof makeKernelPort>;
+  let server: ReturnType<typeof makeServerPort>;
+
+  beforeEach(() => {
+    kernel = makeKernelPort();
+    server = makeServerPort(kernel);
+  });
+
+  it("opts.kernelName (the agent's choice) overrides the config fallback", async () => {
+    const s = new RemoteSession(server, CONFIG, { kernelName: "ir" });
+    await s.initialize();
+    expect(s.kernelName).toBe("ir");
+    expect(server.startKernel).toHaveBeenCalledWith(
+      "ir",
+      expect.objectContaining({ sessionPath: expect.any(String) }),
+    );
+  });
+
+  it("falls back to config.kernelName when no kernelName opt is passed", async () => {
+    const s = new RemoteSession(server, CONFIG);
+    await s.initialize();
+    expect(s.kernelName).toBe("python3");
+  });
+
+  it("initialize fails fast with a clear message when no kernel is selected", async () => {
+    const noKernel = { ...CONFIG, kernelName: undefined };
+    const s = new RemoteSession(server, noKernel);
+    await expect(s.initialize()).rejects.toThrow(/no kernel selected/);
+    // Never touched the network/server.
+    expect(server.ping).not.toHaveBeenCalled();
+  });
+});
