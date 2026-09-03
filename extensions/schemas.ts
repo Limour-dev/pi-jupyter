@@ -16,7 +16,7 @@ import { Type, type Static } from "typebox";
 const KERNEL = Type.Optional(
   Type.String({
     description:
-      "Kernel to serve this notebook — a kernelspec *name* discovered via jupyter_list_kernels, e.g. \"python3\" or \"ir\". A live kernel bound to the path is always kept; otherwise this overrides the notebook file's recorded kernelspec (a warning is shown when they differ). Omit to use the file's kernelspec, then the config fallback.",
+      'Kernelspec *name* (e.g. "python3" or "ir", from jupyter_list_kernels) to serve this notebook when no live kernel is bound to it. Overrides the notebook file\'s recorded kernelspec (a warning is shown when they differ); omit for the file\'s kernelspec, then the config fallback.',
   }),
 );
 
@@ -29,15 +29,14 @@ const KERNEL = Type.Optional(
  */
 const NOTEBOOK = Type.String({
   description:
-    "Remote contents path of the notebook session to run in, e.g. \"notes/pi.ipynb\" " +
-      "(open/continue it first with jupyter_open_notebook, then pass the same path here). Required.",
+    'Remote contents path of the notebook session to run in, e.g. "notes/pi.ipynb" (as opened via jupyter_open_notebook). Required.',
 });
 
 export const JUPYTER_PARAMS = Type.Object({
   notebook: NOTEBOOK,
   code: Type.String({
     description:
-      "Python source to execute in the notebook's persistent remote kernel. Use print(...) for side effects; the last expression's repr is returned as the result. Re-running code whose source matches an existing cell (loaded from the file or run earlier this session) executes IN PLACE — same cell id, outputs replaced, never a duplicate. Different code appends a new cell.",
+      "Code to execute in the notebook's persistent kernel. Use print()/display() for side effects; the last expression's repr is the result. Re-running the same source as an existing cell executes it in place (same cell id, no duplicate); new code appends a cell.",
   }),
   timeout_secs: Type.Optional(
     Type.Number({
@@ -50,7 +49,7 @@ export const JUPYTER_PARAMS = Type.Object({
 export const ADD_DEPENDENCIES_PARAMS = Type.Object({
   notebook: NOTEBOOK,
   packages: Type.Array(Type.String(), {
-    description: "Package specs (e.g. ['matplotlib', 'pandas>=2']).",
+    description: "Package specs to install (e.g. ['matplotlib', 'pandas>=2']).",
   }),
 });
 
@@ -59,7 +58,7 @@ export const SAVE_NOTEBOOK_PARAMS = Type.Object({
   path: Type.Optional(
     Type.String({
       description:
-        "File path to save to (e.g. './analysis.ipynb'). Prefer an absolute path or ~/; relative paths resolve against the current working directory. If omitted, saves to <notebook-id>.ipynb in the working directory.",
+        "Local path to save the .ipynb to (default: <notebook-id>.ipynb in the working directory). Prefer an absolute path or ~/ — relative paths resolve against the working directory.",
     }),
   ),
 });
@@ -68,13 +67,13 @@ export const OPEN_NOTEBOOK_PARAMS = Type.Object({
   path: Type.Optional(
     Type.String({
       description:
-        "Remote contents path of the notebook to open/continue on the Jupyter Server, e.g. \"notes/pi.ipynb\" (as shown by jupyter_list_notebooks). One of `path` or `local_file` is required.",
+        'Remote contents path of the notebook to open/continue, e.g. "notes/pi.ipynb" (as listed by jupyter_list_notebooks). Required unless `local_file` is given.',
     }),
   ),
   local_file: Type.Optional(
     Type.String({
       description:
-        "Local .ipynb file to IMPORT into the server (under its file name at the contents root) and then continue as the remote notebook. One of `path` or `local_file` is required.",
+        "Local .ipynb file to import — uploaded to the server under its file name and continued there. Required unless `path` is given.",
     }),
   ),
   kernel: KERNEL,
@@ -85,7 +84,7 @@ export const LIST_NOTEBOOKS_PARAMS = Type.Object({});
 export const SHUTDOWN_NOTEBOOK_PARAMS = Type.Object({
   path: Type.String({
     description:
-      "Remote contents path of the notebook to shut down (kill its kernel and drop the session) — e.g. \"notes/pi.ipynb\".",
+      'Remote contents path of the notebook to shut down (kill its kernel and drop the session) — e.g. "notes/pi.ipynb".',
   }),
 });
 
@@ -94,11 +93,11 @@ export const LIST_KERNELS_PARAMS = Type.Object({});
 export const SET_KERNEL_PURPOSE_PARAMS = Type.Object({
   kernel: Type.String({
     description:
-      "kernelspec *name* of the kernel, as shown by jupyter_list_kernels (e.g. \"python3\" or \"ir\") — not a display name like \"R\".",
+      'kernelspec *name* of the kernel, as shown by jupyter_list_kernels (e.g. "python3" or "ir") — not a display name like "R".',
   }),
   purpose: Type.String({
     description:
-      "What this kernel is for, as the user explained — e.g. \"data analysis with pandas\" or \"statistics in R\". Persisted across sessions in ~/.pi-jupyter/purposes.json.",
+      'What this kernel is for, as the user explained (e.g. "data analysis with pandas") — persisted in ~/.pi-jupyter/purposes.json.',
   }),
 });
 

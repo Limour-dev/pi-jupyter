@@ -129,8 +129,6 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       label: "List Kernels",
       description:
         "List the kernels available on the remote Jupyter Server. Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
-      promptSnippet:
-        "jupyter_list_kernels: not configured (set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN, or ~/.pi-jupyter/config.json).",
       parameters: LIST_KERNELS_PARAMS,
       async execute() {
         throw new Error(CONFIG_HINT);
@@ -142,8 +140,6 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       label: "List Notebooks",
       description:
         "List the notebooks available to continue on the remote Jupyter Server. Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
-      promptSnippet:
-        "jupyter_list_notebooks: not configured (set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN, or ~/.pi-jupyter/config.json).",
       parameters: LIST_NOTEBOOKS_PARAMS,
       async execute() {
         throw new Error(CONFIG_HINT);
@@ -155,8 +151,6 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       label: "Open / Continue Notebook",
       description:
         "Continue an existing notebook (attach to its live kernel or resume its file). Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
-      promptSnippet:
-        "jupyter_open_notebook: not configured (set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN, or ~/.pi-jupyter/config.json).",
       parameters: OPEN_NOTEBOOK_PARAMS,
       async execute() {
         throw new Error(CONFIG_HINT);
@@ -168,8 +162,6 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       label: "Shut Down Notebook Kernel",
       description:
         "Shut down one notebook's kernel (the .ipynb file stays). Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
-      promptSnippet:
-        "jupyter_shutdown_notebook: not configured (set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN, or ~/.pi-jupyter/config.json).",
       parameters: SHUTDOWN_NOTEBOOK_PARAMS,
       async execute() {
         throw new Error(CONFIG_HINT);
@@ -180,8 +172,6 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       label: "Record Kernel Purpose",
       description:
         "Record what a kernel (kernelspec name) is for, as explained by the user — persisted across sessions. Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
-      promptSnippet:
-        "jupyter_set_kernel_purpose: not configured (set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN, or ~/.pi-jupyter/config.json).",
       parameters: SET_KERNEL_PURPOSE_PARAMS,
       async execute() {
         throw new Error(CONFIG_HINT);
@@ -194,7 +184,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       description:
         "Execute code in a persistent REPL on a remote Jupyter Server. Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
       promptSnippet:
-        "jupyter_repl: run code on a remote Jupyter kernel (not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN, or ~/.pi-jupyter/config.json).",
+        "jupyter_repl: run code on a remote Jupyter notebook kernel (not configured: set JUPYTER_REMOTE_URL / JUPYTER_REMOTE_TOKEN).",
       parameters: JUPYTER_PARAMS,
       async execute() {
         throw new Error(CONFIG_HINT);
@@ -205,8 +195,6 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       label: "Add Dependencies",
       description:
         "Install packages into the remote kernel's environment. Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
-      promptSnippet:
-        "jupyter_add_dependencies: not configured (set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN, or ~/.pi-jupyter/config.json).",
       parameters: ADD_DEPENDENCIES_PARAMS,
       async execute() {
         throw new Error(CONFIG_HINT);
@@ -217,8 +205,6 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       label: "Save Notebook",
       description:
         "Save the current session as an .ipynb file. Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
-      promptSnippet:
-        "jupyter_save_notebook: not configured (set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN, or ~/.pi-jupyter/config.json).",
       parameters: SAVE_NOTEBOOK_PARAMS,
       async execute() {
         throw new Error(CONFIG_HINT);
@@ -381,8 +367,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       const noPurpose: string[] = [];
       const lines: string[] = [
         "Available kernels on the configured Jupyter Server:",
-        "  Pass one of these names as `kernel` to jupyter_open_notebook — used when the",
-        "  notebook has no live kernel and its file records none (e.g. brand-new notebooks).",
+        "  Pass one of these names as `kernel` to jupyter_open_notebook when the notebook has no live kernel and its file records none.",
         "",
       ];
       for (const s of specs) {
@@ -496,10 +481,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     }
     const lines: string[] = [
       "Notebooks available to continue on the configured Jupyter Server:",
-      "  Continue one with jupyter_open_notebook(path=…): it attaches to a live kernel",
-      "  (variables kept) or starts a new one and re-runs the file's cells from first",
-      "  to last (state restored). Then keep passing the same path as `notebook` to",
-      "  jupyter_repl / jupyter_add_dependencies / jupyter_save_notebook.",
+      "  Continue one with jupyter_open_notebook(path=…); then keep passing the same path as `notebook` to jupyter_repl / jupyter_add_dependencies / jupyter_save_notebook.",
       "",
     ];
     if (merged.size === 0) {
@@ -507,8 +489,8 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     } else {
       for (const [path, info] of [...merged.entries()].sort(([a], [b]) => a.localeCompare(b))) {
         const marks: string[] = [];
-        if (info.live) marks.push("LIVE kernel — open attaches, variables kept");
-        else marks.push("file only — open starts a fresh kernel and re-runs its cells from first to last (state restored)");
+        if (info.live) marks.push("LIVE — open attaches, variables kept");
+        else marks.push("file only — open starts a fresh kernel that re-runs its cells (state restored)");
         if (info.open) marks.push("open in this conversation");
         if (info.source === "local" && info.localFile) marks.push(`imported from ${info.localFile}`);
         const purpose = purposes[info.kernel];
@@ -516,16 +498,6 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
         lines.push(`      ${marks.join(" | ")}${info.updated ? ` | last used ${info.updated.slice(0, 10)}` : ""}`);
       }
     }
-    lines.push(
-      "",
-      "Workflow: call this tool FIRST to check the active session(s). If there is no",
-      "active session — or you need to switch notebooks — continue a path here with",
-      "jupyter_open_notebook (list the kernels first with jupyter_list_kernels when",
-      "you do not know them). Opening a previously-closed notebook starts a NEW kernel",
-      "bound to it and re-runs its code cells from first to last, so in-memory state",
-      "is restored before any jupyter_repl call. With an active session, simply reuse",
-      "it via jupyter_repl(notebook=<same path>, code=…).",
-    );
     return {
       text: lines.join("\n"),
       details: {
@@ -541,14 +513,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_list_notebooks",
     label: "List Notebooks",
     description:
-      "List the notebooks available to CONTINUE on the remote Jupyter Server — every contents path pi has opened (~/.pi-jupyter/notebooks.json) merged with the live /api/sessions rows. Call this FIRST to check whether a session is active: each entry shows its kernel and whether a LIVE kernel is bound to it. Continue one with jupyter_open_notebook (it ATTACHES to the live kernel with variables preserved, or starts a fresh kernel that re-runs the file's cells from first to last so state is restored), then run code with jupyter_repl.",
-    promptSnippet:
-      "jupyter_list_notebooks: FIRST check for an active session — LIVE kernels attach with variables intact; file-only notebooks resume with a new kernel that re-runs their cells.",
-    promptGuidelines: [
-      "Call this FIRST whenever the user wants to continue earlier work (or just named a notebook) — it shows which sessions are ACTIVE (open in this conversation / LIVE on the server) and which paths can be resumed.",
-      "If an active session already exists and you are continuing it, pass its path straight to jupyter_repl — that call REUSES the session. If there is no active session, or you need to switch, continue a path with jupyter_open_notebook first (and jupyter_list_kernels first when you do not know the kernels).",
-      "A path marked LIVE has a kernel still running on the server — opening it ATTACHES (no restart, in-memory variables preserved). A 'file only' path starts a NEW kernel bound to that same path and jupyter_open_notebook re-runs its cells from first to last, restoring the state automatically.",
-    ],
+      "List the notebooks available to continue on the remote Jupyter Server — which have a LIVE kernel (jupyter_open_notebook attaches, variables kept) and which are file-only (it starts a fresh kernel that re-runs their cells to restore state).",
     parameters: LIST_NOTEBOOKS_PARAMS,
     async execute() {
       const { text, details } = await describeNotebooks();
@@ -562,15 +527,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_list_kernels",
     label: "List Kernels",
     description:
-      "List the kernels available on the remote Jupyter Server — the python3 / ir / … kernelspecs that can execute code, each annotated with its recorded purpose (persisted across sessions). Only a kernel with no recorded purpose is NEW: ask the user what it is for, record it with jupyter_set_kernel_purpose, then pick the matching kernel when a notebook must be opened on it. The server address itself is already configured by the user and is never chosen here.",
-    promptSnippet:
-      "jupyter_list_kernels: list the kernels on the configured Jupyter Server so the agent can pick the right one when opening a notebook.",
-    promptGuidelines: [
-      "A kernel is what executes code (python3, ir, …) — the Jupyter Server url/token is configured by the user and never selected.",
-      "Call this BEFORE jupyter_open_notebook when you do not know which kernels the server offers (the FIRST step of the flow is still jupyter_list_notebooks). Kernels whose purpose is already recorded (persisted in ~/.pi-jupyter/purposes.json) are shown with it — pick them directly, never re-ask.",
-      "Only a kernel marked 'purpose: not recorded' is NEW: ask the user once what it is for, then record it with `jupyter_set_kernel_purpose`. After that every session shows the purpose and you pick it automatically.",
-      "Pass the chosen name as the `kernel` parameter of jupyter_open_notebook (kernelspec *name*: \"ir\", not \"R\") when the notebook has no live kernel and its file records none. jupyter_repl never takes a `kernel` — the kernel of its notebook session was fixed when the notebook was opened.",
-    ],
+      "List the kernels available on the remote Jupyter Server (python3, ir, …) with each one's recorded purpose; kernels without one are flagged as new.",
     parameters: LIST_KERNELS_PARAMS,
     async execute() {
       const { text, details } = await describeKernels();
@@ -584,9 +541,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_set_kernel_purpose",
     label: "Record Kernel Purpose",
     description:
-      "Record what a kernel (kernelspec name) is for, as the user explained — persisted across sessions in ~/.pi-jupyter/purposes.json, so jupyter_list_kernels shows it later and the agent picks the matching kernel when opening a notebook, without re-asking. Call this right after the user describes a kernel that jupyter_list_kernels marked as having no recorded purpose. Use kernelspec *names* only (\"ir\", not \"R\").",
-    promptSnippet:
-      "jupyter_set_kernel_purpose: remember what a kernel is for so future sessions can pick it without re-asking.",
+      "Record what a kernel (kernelspec *name*) is for, as the user explained — persisted across sessions so later jupyter_list_kernels output shows the purpose and the matching kernel can be picked without re-asking.",
     parameters: SET_KERNEL_PURPOSE_PARAMS,
     async execute(_toolCallId, params: SetKernelPurposeParams) {
       const kernel = params.kernel.trim();
@@ -613,15 +568,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_open_notebook",
     label: "Open / Continue Notebook",
     description:
-      "Start an ACTIVE session on a notebook and CONTINUE it. `path` is a remote contents path (e.g. \"notes/pi.ipynb\", as listed by jupyter_list_notebooks) or `local_file` is a .ipynb on this machine to import under its file name and then continue. If a LIVE kernel is bound to the path, this ATTACHES to that kernel — no new kernel is started, so in-memory variables from the earlier session survive. Otherwise (the previously-closed session) a NEW kernel is started bound to the SAME path and the file's code cells are executed FROM FIRST TO LAST so the state is rebuilt before any jupyter_repl call; a path with no file yet just starts the document empty. The kernel comes from the `kernel` param, else from the notebook file's recorded kernelspec, else the configured fallback.",
-    promptSnippet:
-      "jupyter_open_notebook: start/continue a notebook session — attach to its live kernel (variables kept), or start a new kernel bound to the same path and re-run its cells from first to last to restore state.",
-    promptGuidelines: [
-      "This is how a session is STARTED. Flow: jupyter_list_notebooks FIRST to see if a session is already active; when there is none (or you need to switch notebooks), open one here — and call jupyter_list_kernels first if you don't know which kernels the server offers. Only after this returns do you run code with jupyter_repl(notebook=…).",
-      "If the result says 'attached', the previous kernel is still running — variables/imports are intact, just keep working.",
-      "If it says 'started', the notebook was previously closed: a NEW kernel was started and its code cells were re-run FROM FIRST TO LAST (identical source → executed IN PLACE — same cell id, outputs replaced — so the notebook keeps one copy per logical cell). The result lists each cell's outcome, so state is already rebuilt unless a cell failed — fix any failure and re-run.",
-      "Then keep passing the same `notebook` path on jupyter_repl / jupyter_add_dependencies / jupyter_save_notebook calls — they REUSE this session.",
-    ],
+      "Open/continue a notebook session on the remote Jupyter Server. A LIVE kernel bound to the path is ATTACHED (no new kernel — variables kept); otherwise a NEW kernel is started on the same path and the file's code cells are re-run from first to last, restoring the state (a path with no file starts empty). Give `path` (a remote contents path, as listed by jupyter_list_notebooks) or `local_file` (import a local .ipynb). Pass `kernel` (a kernelspec name) when there is no live kernel and the file records none — otherwise the file's kernelspec, then the config fallback, apply.",
     parameters: OPEN_NOTEBOOK_PARAMS,
     async execute(_toolCallId, params: OpenNotebookParams, _signal, _onUpdate, ctx) {
       const localRaw = params.local_file?.trim();
@@ -740,9 +687,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_shutdown_notebook",
     label: "Shut Down Notebook Kernel",
     description:
-      "Shut down a notebook's kernel: kill the kernel and drop its session row on the server (the .ipynb file stays on the server; a future jupyter_open_notebook resumes it with a fresh kernel, re-running its cells from first to last). The path may be a notebook open in this conversation OR any LIVE kernel bound to that path on the server (left by an earlier conversation or a browser tab). Use /jupyter-reset to shut down everything.",
-    promptSnippet:
-      "jupyter_shutdown_notebook: kill one notebook's kernel (open here or live on the server; the file stays, resume restarts a fresh kernel).",
+      "Shut down one notebook's kernel on the server — its .ipynb file stays, and a later jupyter_open_notebook resumes it with a fresh kernel. `path` may be a notebook open in this conversation or any LIVE kernel bound to that path on the server (left by an earlier conversation or a browser tab). Use /jupyter-reset to shut down everything.",
     parameters: SHUTDOWN_NOTEBOOK_PARAMS,
     async execute(_toolCallId, params: ShutdownNotebookParams) {
       const path = normalizeContentsPath(params.path);
@@ -790,15 +735,14 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_repl",
     label: "Jupyter REPL",
     description:
-      "Execute code in the ACTIVE notebook session on a remote Jupyter Server. `notebook` is REQUIRED — the remote contents path of the notebook to run in (open/continue it first with jupyter_open_notebook, then keep passing the same path; it REUSES that session). Variables, imports, and state persist across calls in that notebook's kernel. The last expression is the result; use print() for intermediate output. Images are returned inline.",
+      "Execute code in a notebook's persistent kernel on the remote Jupyter Server. `notebook` (required) is the remote contents path of the notebook to run in — pass the path you opened with jupyter_open_notebook to REUSE that session (a not-yet-open notebook is opened the same way first). Variables/imports persist across calls in that notebook's kernel. The last expression is the result; use print()/display() for intermediate output; images are returned inline.",
     promptSnippet:
-      "jupyter_repl: run code in an open notebook session (notebook is required — continue it with jupyter_open_notebook first, then reuse it here).",
+      "jupyter_repl: run code on a remote Jupyter notebook kernel — pass the notebook path opened with jupyter_open_notebook.",
     promptGuidelines: [
-      "Call jupyter_list_notebooks FIRST to see whether a session is already active. If one is active, pass its path here — the session is REUSED. If none is active (or you need to switch notebooks), start one with jupyter_open_notebook first (and jupyter_list_kernels first if you do not know the kernels), then run code here.",
-      "State persists between calls in the notebook's remote kernel — no need to re-import or redefine on every turn unless the session was reset. Opening a previously-closed notebook re-runs its cells from first to last (state restored); continue working here afterwards.",
-      "There is no `kernel` or `dependencies` parameter: the kernel was fixed when the notebook was opened (live kernel / recorded kernelspec / the `kernel` param of jupyter_open_notebook). Install packages with jupyter_add_dependencies.",
-      "The last expression is the result; use print() or display() for intermediate output.",
-      "Images (matplotlib, PIL) come back inline. The user sees them if their terminal supports graphics.",
+      "Begin Jupyter work with jupyter_list_notebooks to see which sessions are active (open here / LIVE on the server); with none active — or to switch — continue a notebook with jupyter_open_notebook first (call jupyter_list_kernels first when you do not know the kernels), then run code with jupyter_repl.",
+      "Pass the same `notebook` path to jupyter_repl / jupyter_add_dependencies / jupyter_save_notebook to REUSE the session. Opening a previously-closed notebook starts a new kernel bound to its file and re-runs the code cells from first to last (state restored); opening a LIVE one attaches with variables kept.",
+      "jupyter_repl has no `kernel` or `dependencies` parameter — the kernel was fixed when the notebook was opened (live kernel / recorded kernelspec / the `kernel` param of jupyter_open_notebook / config fallback). Install packages with jupyter_add_dependencies.",
+      "The last expression is the result; use print()/display() for intermediate output. Images (matplotlib, PIL) come back inline.",
     ],
     parameters: JUPYTER_PARAMS,
 
@@ -953,9 +897,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_add_dependencies",
     label: "Add Dependencies",
     description:
-      "Install packages into a notebook session's kernel without restarting. `notebook` is REQUIRED — the remote contents path of the notebook whose kernel should get the packages (open/continue it first with jupyter_open_notebook, then pass the same path; an already-open session is reused). Python kernels use %pip (pip-style specs like 'matplotlib', 'numpy>=2'); R kernels use install.packages (CRAN names like 'ggplot2'). Reports the real error when installation fails.",
-    promptSnippet:
-      "jupyter_add_dependencies: install packages into an open notebook's kernel (no restart needed). `notebook` is required — pass the same path you opened with jupyter_open_notebook.",
+      "Install packages into a notebook's kernel WITHOUT restarting. Python kernels use %pip (specs like 'matplotlib', 'numpy>=2'); R kernels use CRAN install.packages (e.g. 'ggplot2'); other languages fail explicitly. Real install errors are reported, never masked.",
     parameters: ADD_DEPENDENCIES_PARAMS,
     async execute(_toolCallId, params: AddDependenciesParams, signal) {
       if (signal?.aborted) throw new Error("aborted");
@@ -996,8 +938,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_save_notebook",
     label: "Save Notebook",
     description:
-      "Save the session of a notebook as an .ipynb file (openable in Jupyter / VSCode). `notebook` is REQUIRED — the remote contents path of the notebook to export (open/continue it first with jupyter_open_notebook, then pass the same path). Prefer an absolute path or ~/ — relative paths resolve against the current working directory, not the pi process directory.",
-    promptSnippet: "jupyter_save_notebook: save the current session as an .ipynb file.",
+      "Save a notebook session as a local .ipynb file (openable in Jupyter / VSCode). `path` defaults to <notebook-id>.ipynb in the working directory; relative paths resolve against the working directory, so prefer absolute paths or ~/.",
     parameters: SAVE_NOTEBOOK_PARAMS,
     async execute(_toolCallId, params: SaveNotebookParams, signal, _onUpdate, ctx) {
       if (signal?.aborted) throw new Error("aborted");
