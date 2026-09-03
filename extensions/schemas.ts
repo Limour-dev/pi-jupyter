@@ -79,7 +79,21 @@ export const OPEN_NOTEBOOK_PARAMS = Type.Object({
   kernel: KERNEL,
 });
 
-export const LIST_NOTEBOOKS_PARAMS = Type.Object({});
+export const LIST_NOTEBOOKS_PARAMS = Type.Object({
+  /**
+   * REQUIRED remote contents directory the listing is scoped to — the same
+   * "/"-separated coordinate space the listed paths live in (e.g. "notes").
+   * Only notebook sessions whose path sits DIRECTLY in that directory are
+   * shown; the listing NEVER recurses into subdirectories, so the tool stays
+   * small and relevant as more folders accumulate on the server. Pass "."
+   * for the server root (top-level notebooks only).
+   */
+  dir: Type.String({
+    minLength: 1,
+    description:
+      'Remote contents directory the listing is scoped to (required) — the same "/"-separated coordinate space the listed paths use, e.g. "notes". Shows ONLY notebook sessions whose path sits DIRECTLY in this directory; the listing NEVER recurses into subdirectories (notes/sub/….ipynb is hidden), keeping it small as more folders accumulate. Pass "." for the server root (top-level notebooks only).',
+  }),
+});
 
 export const SHUTDOWN_NOTEBOOK_PARAMS = Type.Object({
   path: Type.String({
@@ -104,6 +118,7 @@ export const SET_KERNEL_PURPOSE_PARAMS = Type.Object({
 export type JupyterParams = Static<typeof JUPYTER_PARAMS>;
 export type AddDependenciesParams = Static<typeof ADD_DEPENDENCIES_PARAMS>;
 export type SaveNotebookParams = Static<typeof SAVE_NOTEBOOK_PARAMS>;
+export type ListNotebooksParams = Static<typeof LIST_NOTEBOOKS_PARAMS>;
 export type OpenNotebookParams = Static<typeof OPEN_NOTEBOOK_PARAMS>;
 export type ShutdownNotebookParams = Static<typeof SHUTDOWN_NOTEBOOK_PARAMS>;
 export type SetKernelPurposeParams = Static<typeof SET_KERNEL_PURPOSE_PARAMS>;

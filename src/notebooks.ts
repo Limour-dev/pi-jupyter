@@ -3,8 +3,10 @@
  * store listing every contents path pi has opened.
  *
  * Purpose: continuity across conversations. A NEW pi conversation starts with
- * an empty session map; `jupyter_list_notebooks` merges this registry with the
- * server's live /api/sessions rows so the agent (and the user) can say
+ * an empty session map; `jupyter_list_notebooks(dir=…)` merges this registry with the
+ * server's live /api/sessions rows — scoped to one remote contents directory (only
+ * direct children of `dir`, never recursing into subdirectories) — so the agent (and
+ * the user) can say
  * "continue notebook X" — attaching to X's still-running kernel when one
  * exists, or resuming X's file with a fresh kernel bound to the same path.
  *

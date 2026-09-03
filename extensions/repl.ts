@@ -11,9 +11,12 @@
  *   src/domain/             pure logic
  * Notebook-first execution — how a NEW agent session should drive this
  * extension:
- *   - `jupyter_list_notebooks` first: it shows every notebook that is ACTIVE
- *     (open this conversation / LIVE kernel on the server) or resumable from a
- *     saved file (~/.pi-jupyter/notebooks.json merged with /api/sessions).
+ *   - `jupyter_list_notebooks(dir=…)` first: it shows the notebooks in ONE
+ *     remote contents directory (required `dir`, direct children ONLY — it never
+ *     recurses into subdirectories, so the list stays scoped as more folders
+ *     accumulate) that are ACTIVE (open this conversation / LIVE kernel on the
+ *     server) or resumable from a saved file (~/.pi-jupyter/notebooks.json
+ *     merged with /api/sessions). Pass "." for the server root.
  *   - No active session yet, or switching to another notebook → CONTINUE one
  *     with `jupyter_open_notebook` (a `path` from jupyter_list_notebooks, or a
  *     `local_file` to import). When the agent does not know which kernels the
@@ -85,6 +88,7 @@ import {
   SHUTDOWN_NOTEBOOK_PARAMS,
   type AddDependenciesParams,
   type JupyterParams,
+  type ListNotebooksParams,
   type OpenNotebookParams,
   type SaveNotebookParams,
   type SetKernelPurposeParams,
@@ -115,6 +119,36 @@ function expandHome(userPath: string): string {
   return userPath;
 }
 
+/**
+ * Does a remote contents path sit DIRECTLY inside a directory — its parent is
+ * exactly that directory, never deeper? `jupyter_list_notebooks(dir=…)` scopes
+ * its listing with this predicate: "the notebooks in notes/" shows notes/a.ipynb
+ * but never notes/sub/a.ipynb (no recursion into subdirectories). Matching
+ * happens in remote-contents coordinates — the same "/"-separated strings the
+ * listing shows — and each side is normalized first ("./" and leading/trailing
+ * "/" stripped, so "notes/" ≡ "notes" and "./notes/a.ipynb" ≡ "notes/a.ipynb").
+ * The server root is written "." and matches only top-level notebooks.
+ */
+function isDirectChild(contentsPath: string, dir: string): boolean {
+  const normalize = (p: string) =>
+    p.trim()
+      .replace(/\\/g, "/")
+      .replace(/^(?:\.\/)+/, "")
+      .replace(/^\/+/, "")
+      .replace(/\/+$/, "");
+  // A bare "." denotes the root — drop empty and "." segments so both "." and ""
+  // collapse to the empty dirSegs handled below (top-level notebooks only).
+  const segments = (p: string) => normalize(p).split("/").filter((s) => s !== "" && s !== ".");
+  const fileSegs = segments(contentsPath);
+  const dirSegs = segments(dir);
+  if (dirSegs.length === 0) return fileSegs.length === 1; // "." (root) → top-level notebooks only
+  if (fileSegs.length !== dirSegs.length + 1) return false;
+  for (let i = 0; i < dirSegs.length; i++) {
+    if (fileSegs[i] !== dirSegs[i]) return false;
+  }
+  return true;
+}
+
 // ── extension ───────────────────────────────────────────────────────────────
 
 export default function piJupyterExtension(pi: ExtensionAPI) {
@@ -139,7 +173,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       name: "jupyter_list_notebooks",
       label: "List Notebooks",
       description:
-        "List the notebooks available to continue on the remote Jupyter Server. Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
+        'List the notebooks in ONE remote contents directory (`dir`, required — direct children only, never recursing into subdirectories; pass "." for the server root) available to continue on the remote Jupyter Server. Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.',
       parameters: LIST_NOTEBOOKS_PARAMS,
       async execute() {
         throw new Error(CONFIG_HINT);
@@ -410,15 +444,17 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
   }
 
   /**
-   * Human + structured view of the notebooks the agent can CONTINUE:
-   * registry entries (~/.pi-jupyter/notebooks.json) merged with the server's
-   * live /api/sessions rows — this is what a NEW agent consults FIRST to see
+   * Human + structured view of the notebooks the agent can CONTINUE that sit
+   * DIRECTLY inside ONE remote contents directory (`dir`, required — see
+   * `isDirectChild`; never recurses into subdirectories): registry entries
+   * (~/.pi-jupyter/notebooks.json) merged with the server's live
+   * /api/sessions rows — this is what a NEW agent consults FIRST to see
    * whether a session is active. A live row means "attach — kernel still
    * running, variables preserved"; a registry-only path means "file only —
    * opening it starts a NEW kernel bound to the same path and re-runs its code
    * cells from first to last, restoring the state".
    */
-  async function describeNotebooks(): Promise<{ text: string; details: Record<string, unknown> }> {
+  async function describeNotebooks(dir: string): Promise<{ text: string; details: Record<string, unknown> }> {
     const server = new JupyterServer(config);
     const purposes = loadPurposes();
     let liveRows: Array<{ path: string; kernelName: string }> = [];
@@ -479,15 +515,30 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
         });
       }
     }
+    // Scope to one directory (direct children only) so the list stays small as
+    // more notebooks accumulate; subdirectories are never descended into.
+    const rows = [...merged.entries()]
+      .filter(([path]) => isDirectChild(path, dir))
+      .sort(([a], [b]) => a.localeCompare(b));
+    const liveShown = liveRows.filter((r) => isDirectChild(r.path, dir));
     const lines: string[] = [
-      "Notebooks available to continue on the configured Jupyter Server:",
+      `Notebooks available to continue on the configured Jupyter Server (directly in "${dir}"):`,
       "  Continue one with jupyter_open_notebook(path=…); then keep passing the same path as `notebook` to jupyter_repl / jupyter_add_dependencies / jupyter_save_notebook.",
       "",
     ];
-    if (merged.size === 0) {
-      lines.push("  (none yet — open a path with jupyter_open_notebook to create the first session)");
+    if (rows.length === 0) {
+      if (merged.size === 0) {
+        lines.push(
+          `  (none recorded yet — open a notebook under "${dir}" with jupyter_open_notebook to create the first session)`,
+        );
+      } else {
+        const hint = dir === "." ? "a folder name" : '"."';
+        lines.push(
+          `  (no notebook sits directly in "${dir}" — the listing never recurses into subdirectories; try ${hint} to widen the scope)`,
+        );
+      }
     } else {
-      for (const [path, info] of [...merged.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+      for (const [path, info] of rows) {
         const marks: string[] = [];
         if (info.live) marks.push("LIVE — open attaches, variables kept");
         else marks.push("file only — open starts a fresh kernel that re-runs its cells (state restored)");
@@ -501,8 +552,9 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     return {
       text: lines.join("\n"),
       details: {
-        notebooks: [...merged.entries()].map(([path, info]) => ({ path, ...info })),
-        live_paths: liveRows.map((r) => r.path),
+        dir,
+        notebooks: rows.map(([path, info]) => ({ path, ...info })),
+        live_paths: liveShown.map((r) => r.path),
       },
     };
   }
@@ -513,10 +565,14 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_list_notebooks",
     label: "List Notebooks",
     description:
-      "List the notebooks available to continue on the remote Jupyter Server — which have a LIVE kernel (jupyter_open_notebook attaches, variables kept) and which are file-only (it starts a fresh kernel that re-runs their cells to restore state).",
+      'List the notebooks on the remote Jupyter Server that sit DIRECTLY in the given remote contents `dir` (required) — the listing is scoped to one folder and NEVER recurses into subdirectories, so it stays small as more folders accumulate; pass "." for the server root. Shows which have a LIVE kernel (jupyter_open_notebook attaches, variables kept) and which are file-only (it starts a fresh kernel that re-runs their cells to restore state).',
     parameters: LIST_NOTEBOOKS_PARAMS,
-    async execute() {
-      const { text, details } = await describeNotebooks();
+    async execute(_toolCallId, params: ListNotebooksParams) {
+      const dir = params.dir.trim();
+      if (!dir) {
+        throw new Error('[pi-jupyter] jupyter_list_notebooks needs a non-empty `dir` — a remote contents directory (e.g. "notes"); pass "." for the server root.');
+      }
+      const { text, details } = await describeNotebooks(dir);
       return { content: [{ type: "text", text }], details };
     },
   });
@@ -739,7 +795,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     promptSnippet:
       "jupyter_repl: run code on a remote Jupyter notebook kernel — pass the notebook path opened with jupyter_open_notebook.",
     promptGuidelines: [
-      "Begin Jupyter work with jupyter_list_notebooks to see which sessions are active (open here / LIVE on the server); with none active — or to switch — continue a notebook with jupyter_open_notebook first (call jupyter_list_kernels first when you do not know the kernels), then run code with jupyter_repl.",
+      "Begin Jupyter work with jupyter_list_notebooks(dir=…) to see which sessions are active in the current remote contents folder (open here / LIVE on the server) — scope the listing to one directory (direct children only, no recursion); with none active — or to switch — continue a notebook with jupyter_open_notebook first (call jupyter_list_kernels first when you do not know the kernels), then run code with jupyter_repl.",
       "Pass the same `notebook` path to jupyter_repl / jupyter_add_dependencies / jupyter_save_notebook to REUSE the session. Opening a previously-closed notebook starts a new kernel bound to its file and re-runs the code cells from first to last (state restored); opening a LIVE one attaches with variables kept.",
       "jupyter_repl has no `kernel` or `dependencies` parameter — the kernel was fixed when the notebook was opened (live kernel / recorded kernelspec / the `kernel` param of jupyter_open_notebook / config fallback). Install packages with jupyter_add_dependencies.",
       "The last expression is the result; use print()/display() for intermediate output. Images (matplotlib, PIL) come back inline.",

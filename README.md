@@ -11,8 +11,9 @@ sessions are gone (`jupyter_repl` requires `notebook` and no longer takes `kerne
 
 ## Features
 
-- `jupyter_list_notebooks` — FIRST step: shows every notebook that is ACTIVE (open this
-  conversation / LIVE kernel on the server) or resumable from a saved file
+- `jupyter_list_notebooks(dir=…)` — FIRST step, **scoped to one remote contents directory**: shows the notebooks that are ACTIVE (open this
+  conversation / LIVE kernel on the server) or resumable from a saved file, taking only **direct children of `dir`** — it never recurses into
+  subdirectories, so the list stays small as more folders accumulate (pass `"."` for the server root)
 - `jupyter_open_notebook` — start an ACTIVE session on a notebook: attaches to its
   still-running kernel when one is bound to the path (no new kernel, variables kept), or
   starts a NEW kernel bound to the same path and **re-runs the file's code cells from
@@ -58,7 +59,7 @@ Optional config file: `~/.pi-jupyter/config.json`
 There are **no anonymous kernel sessions**: code always runs on the kernel of a notebook
 that was opened by `jupyter_open_notebook`. A NEW agent follows this flow:
 
-1. `jupyter_list_notebooks` — detect whether a session is already active.
+1. `jupyter_list_notebooks(dir=…)` — detect whether a session is already active in the current remote folder (`dir` is required; only notebooks sitting directly in it are shown — no recursion).
 2. No active session, or switching to another notebook → `jupyter_open_notebook`
    (`path` from the list, or `local_file` to import). If you do not know which kernels
    the server offers, call `jupyter_list_kernels` first.
@@ -70,7 +71,7 @@ that was opened by `jupyter_open_notebook`. A NEW agent follows this flow:
 
 ```text
 you:   "continue my notes/pi.ipynb"
-agent: jupyter_list_notebooks                     # 1. is a session active?
+agent: jupyter_list_notebooks(dir=".")             # 1. is a session active?
        → notes/pi.ipynb   (kernel python3)  [LIVE kernel — open attaches, variables kept]
        → analysis.ipynb   (kernel ir)       [file only — open starts a fresh kernel]
 agent: jupyter_open_notebook(path="notes/pi.ipynb")   # 2. continue / switch
@@ -119,7 +120,7 @@ later `jupyter_list_kernels` shows the purpose.
 A NEW conversation can pick up where an earlier one left off — no re-running everything
 from scratch, and when the kernel is still alive, **no new kernel at all**. What pi has
 opened is remembered in `~/.pi-jupyter/notebooks.json` (contents path → kernel), and
-`jupyter_list_notebooks` merges that registry with the server's live `/api/sessions` rows.
+`jupyter_list_notebooks(dir=…)` merges that registry with the server's live `/api/sessions` rows and shows only notebooks sitting **directly in `dir`** (never recursing into subdirectories).
 
 - **The notebook is a remote contents path** (e.g. `notes/pi.ipynb`): the same path is the
   `/api/sessions` bind row and the auto-save target, so the file you open in JupyterLab,
@@ -179,7 +180,7 @@ Typical first-run flow — only new kernels without a recorded purpose are asked
 later sessions reuse the notes:
 
 ```text
-agent: jupyter_list_notebooks            # none yet — no active session
+agent: jupyter_list_notebooks(dir=".")      # none yet — no active session
 agent: jupyter_list_kernels
        → python3  (purpose recorded: data wrangling)      # reuse, no question
        → ir      (purpose: not recorded)  ← NEW

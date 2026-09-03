@@ -27,8 +27,8 @@ v3 collapses the model to **one kind of session**:
 - Opening a notebook whose kernel was **previously closed** starts a NEW kernel
   bound to the same path and **re-runs the file's code cells from first to
   last**, so in-memory state is rebuilt automatically.
-- The agent flow is fixed and self-checkable: `jupyter_list_notebooks` (is a
-  session active?) → `jupyter_open_notebook` (+ `jupyter_list_kernels` when the
+- The agent flow is fixed and self-checkable: `jupyter_list_notebooks(dir=…)`
+  (is a session active in that folder?) → `jupyter_open_notebook` (+ `jupyter_list_kernels` when the
   kernels are unknown) → `jupyter_repl`.
 
 v2's engineering decisions are carried over unchanged (hexagonal layout, the
@@ -183,8 +183,10 @@ document order) let the tool layer tell the agent exactly what is there.
 
 ### The agent flow (encoded in the tool prompts)
 
-1. `jupyter_list_notebooks` — detect whether a session is active (open this
-   conversation / LIVE kernel on the server) and what else is resumable.
+1. `jupyter_list_notebooks(dir=…)` — detect whether a session is active in the given remote contents directory (open this
+   conversation / LIVE kernel on the server) and what else is resumable. The `dir` parameter is required and the listing
+   shows only notebooks sitting DIRECTLY in it — never recursing into subdirectories, so it stays small as more folders
+   accumulate (pass `"."` for the server root).
 2. No active session, or switching to another notebook → `jupyter_open_notebook`
    (`path`, or `local_file` to import). `jupyter_list_kernels` first when the
    kernels are unknown.
@@ -226,9 +228,10 @@ connections but leaves the server-side kernel/session row running.
 
 `src/notebooks.ts` keeps `~/.pi-jupyter/notebooks.json` (contents path →
 `{kernelName, updated, source, localFile?}`), written whenever a session opens
-(atomic tmp+rename, like `purposes.json`). `jupyter_list_notebooks` merges it
-with the server's LIVE `/api/sessions` rows (`ServerPort.listSessions`) and
-annotates every candidate: **LIVE kernel → attach, variables kept** vs
+(atomic tmp+rename, like `purposes.json`). `jupyter_list_notebooks(dir=…)`
+merges it with the server's LIVE `/api/sessions` rows (`ServerPort.listSessions`)
+and annotates every candidate that sits DIRECTLY in `dir` (its required
+parameter) — **LIVE kernel → attach, variables kept** vs
 **file only → open starts a new kernel and re-runs its cells (state restored)**.
 A brand-new conversation — empty session map, no in-memory state — therefore
 still knows what it can continue. `jupyter_open_notebook` accepts a remote path
