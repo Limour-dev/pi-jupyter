@@ -12,11 +12,11 @@
  * Optional config file: ~/.pi-jupyter/config.json
  *   { "url": "...", "token": "...", ... }
  *
- * The kernel that executes the code (python3 / ir / …) is NOT configured
- * here — the agent discovers the kernels on the server itself
- * (`jupyter_list_kernels`) and picks one per call via the `kernel`
- * parameter. `kernelName` below is kept ONLY as an optional fallback default
- * for tool calls that omit `kernel`; it never overrides the agent's choice.
+ * The kernel that executes the code (python3 / ir / …) is fixed when a
+ * notebook is OPENED (see ARCHITECTURE.md): the agent's `kernel` parameter
+ * on jupyter_open_notebook, else the kernelspec recorded in the notebook
+ * file, else `kernelName` here as the optional fallback default. `kernelName`
+ * never overrides an explicit `kernel` or a file's recorded kernelspec.
  *
  * Optional extras: JUPYTER_WORKING_DIR (base for relative save paths),
  * JUPYTER_TIMEOUT_RESTART_KERNEL=1 (auto-restart a kernel still busy after a
@@ -32,9 +32,10 @@ export interface ShimConfig {
   url: string;
   token: string;
   /**
-   * Optional fallback default kernel (kernelspec name) when a tool call
-   * omits `kernel`. The agent decides the kernel per call (see ARCHITECTURE.md);
-   * when unset we fall back to the server's default kernelspec.
+   * Optional fallback default kernel (kernelspec name) for notebooks that are
+   * opened with no explicit `kernel` and whose file records none. The kernel is
+   * fixed when a notebook is opened (see ARCHITECTURE.md); when this is unset
+   * we fall back to "python3".
    */
   kernelName?: string;
   tlsInsecure: boolean;
@@ -92,8 +93,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   return {
     url,
     token,
-    // The kernel is the AGENT's decision (ARCHITECTURE.md); env/file values are
-    // only an optional fallback when a tool call omits `kernel`.
+    // The kernel is fixed when a notebook is opened (ARCHITECTURE.md); env/file
+    // values are only an optional fallback for opens with no kernel and no
+    // recorded kernelspec.
     kernelName: nonEmpty(
       env.JUPYTER_KERNEL_NAME ?? (file.kernelName as string | undefined),
     ),

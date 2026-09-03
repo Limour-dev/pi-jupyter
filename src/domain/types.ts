@@ -72,9 +72,9 @@ export type CreateSessionOpts = {
   runtime?: string;
   /**
    * The kernel (kernelspec name, e.g. "python3" / "ir") this session runs on.
-   * The agent picks it per call (ARCHITECTURE.md); when omitted, RemoteSession
-   * falls back to `ShimConfig.kernelName` — or, when resuming an existing
-   * notebook, to the kernelspec recorded in that file.
+   * It is fixed when the notebook is opened (ARCHITECTURE.md): `resume()` uses
+   * this opt first, then the kernelspec recorded in the notebook file, then
+   * `ShimConfig.kernelName`, then "python3". A live bound kernel always wins.
    */
   kernelName?: string;
   workingDir?: string;
@@ -125,7 +125,7 @@ export interface Session {
   readonly kernelName: string;
   /**
    * Remote contents path this session lives at — the /api/sessions bind row and
-   * the auto-save target (anonymous sessions default to `<notebookId>.ipynb`).
+   *   the auto-save target (a session created without an explicit path defaults to `<notebookId>.ipynb`).
    */
   readonly contentsPath: string;
   runCell(code: string, opts?: RunCellOpts): Promise<CellResult>;
@@ -152,8 +152,8 @@ export interface Session {
   listCells(): DocumentCell[];
   /**
    * How this session attached to its contents path (set by resume(); undefined
-   * for anonymous sessions): "attached" reused a live kernel, "started" began
-   * a new one.
+   * for sessions created directly with initialize()): "attached" reused a live
+   * kernel, "started" began a new one.
    */
   readonly resumeOutcome?: ResumeOutcome;
   getRuntimeStatus(): Promise<RuntimeStatus | undefined>;

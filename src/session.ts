@@ -91,7 +91,7 @@ export class RemoteSession implements Session {
   /**
    * Outcome of the latest `resume()` — how this session attached to its path
    * ("attached" keeps the live kernel; "started" began a new one). Set by
-   * resume(); undefined for anonymous sessions.
+   * resume(); undefined for sessions created directly with initialize().
    */
   resumeOutcome?: ResumeOutcome;
   /**

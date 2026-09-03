@@ -120,8 +120,7 @@ export interface ServerPort {
    * /api/sessions/<id>): kills its kernel and drops the session row. The
    * notebook FILE at `model.path` stays on the server. Used by
    * `jupyter_shutdown_notebook` for kernels this conversation never opened
-   * (left running by an earlier conversation, the browser, or an
-   * auto-materialized anonymous session).
+   * (left running by an earlier conversation or the browser).
    */
   shutdownSession(model: ServerSessionModel): Promise<void>;
   dispose(): void;
