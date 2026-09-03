@@ -10,14 +10,18 @@ rationale and the lessons carried over from v1.
 ## Features
 
 - `jupyter_repl` — persistent remote Jupyter kernel; state survives between calls
+- `jupyter_open_notebook` — CONTINUE an existing notebook: attaches to its still-running kernel when one is bound to the path (no new kernel — variables preserved), otherwise resumes the file with a new kernel bound to the same path
+- `jupyter_list_notebooks` — notebooks available to continue (registry ∪ live sessions), each marked LIVE-kernel or file-only
+- `jupyter_shutdown_notebook` — kill one notebook's kernel (the .ipynb file stays)
 - `jupyter_list_kernels` — discover the kernels (python3, ir, …) on the server; shows each kernel's recorded purpose and flags new ones with none
 - `jupyter_add_dependencies` — hot-install packages into a running kernel (`%pip` for Python, `install.packages` for R), no restart
 - `jupyter_set_kernel_purpose` — persist the user's explanation of what a kernel is for (across sessions)
 - `jupyter_save_notebook` — export a session as a valid `.ipynb`
 - **Remote auto-save** — after every cell, the notebook snapshot is uploaded to the remote server (remote `$HOME` by default), so the *same kernel* can be re-opened in a browser
-- `/jupyter-reset` — drop all kernels and start clean
+- **Kernels outlive the conversation** — named-notebook kernels keep running on the server when pi ends, so a later conversation can attach to them again (`JUPYTER_KEEP_KERNELS=0` restores kill-on-exit)
+- `/jupyter-reset` — shut down ALL kernels (anonymous + open notebooks); saved .ipynb files stay and can be resumed
 - Inline matplotlib/PIL images returned to the model
-- Streaming output, execution-timeout interrupt, no orphan kernels on exit
+- Streaming output, execution-timeout interrupt; cleanup is explicit (`/jupyter-reset`, `jupyter_shutdown_notebook`) — kernels are meant to survive pi so they can be re-attached
 
 ## Quick start
 
@@ -63,8 +67,49 @@ purpose and auto-selects without re-asking.
 | `JUPYTER_WORKING_DIR` | process cwd | Base dir for relative `save_notebook` paths |
 | `JUPYTER_TIMEOUT_RESTART_KERNEL` | off | Restart a kernel still busy after a timeout (state lost) |
 | `JUPYTER_BIND_SESSION` | on | Bind the kernel to an `/api/sessions` row so it shows in the Jupyter Running UI (`=0` restores bare-kernel behavior) |
+| `JUPYTER_KEEP_KERNELS` | on | Named-notebook kernels keep running on the server when a pi conversation ends, so a later conversation/browser can re-attach to the same notebook (variables kept). `=0` restores kill-on-exit |
 | `JUPYTER_REMOTE_AUTOSAVE` | on | Upload the notebook snapshot to the remote server after every cell (`=0` disables) |
-| `JUPYTER_REMOTE_SAVE_PATH` | `<notebookId>.ipynb` | Remote contents path for the auto-save, e.g. `notes/pi.ipynb` |
+| `JUPYTER_REMOTE_SAVE_PATH` | `<notebookId>.ipynb` | Remote contents path for the auto-save of *anonymous* sessions, e.g. `notes/pi.ipynb` (a notebook opened at an explicit path always auto-saves to that path) |
+## Continue a notebook across conversations
+
+A NEW conversation can pick up where an earlier one left off — no re-running
+everything from scratch, and when the kernel is still alive, **no new kernel
+at all**. The agent drives it with three tools:
+
+```text
+you:   "continue my notes/pi.ipynb"
+agent: jupyter_list_notebooks
+       → notes/pi.ipynb   (kernel python3)  [LIVE kernel — open attaches, variables kept]
+       → analysis.ipynb   (kernel ir)       [file only — open resumes with a new kernel]
+agent: jupyter_open_notebook(path="notes/pi.ipynb")
+       → Attached to the LIVE kernel serving notes/pi.ipynb — variables intact
+agent: jupyter_repl(notebook="notes/pi.ipynb", code="...")   # keep passing the path
+```
+
+- **The notebook is a remote contents path** (e.g. `notes/pi.ipynb`): the same
+  path is the `/api/sessions` bind row and the auto-save target, so the file you
+  open in JupyterLab, the kernel the browser attaches to, and the session pi
+  resumes are one and the same object.
+- **Live kernel → attach.** When a kernel is still running on the server bound
+  to that path (left by an earlier pi conversation or opened in the browser),
+  `jupyter_open_notebook` re-connects to it — in-memory variables/imports are
+  preserved and nothing restarts. This works across conversations because named
+  notebook kernels are **not killed** when a pi conversation ends
+  (`JUPYTER_KEEP_KERNELS=0` restores the legacy kill-on-exit).
+- **File only → resume.** If no kernel is running, a new kernel is started
+  *bound to the same path* and the file's existing cells are loaded into the
+  document (markdown/raw cells preserved verbatim). Variables were not kept —
+  the open result lists the code cells so the agent re-runs the setup ones;
+  re-running a cell whose source matches a loaded cell executes it **in place**
+  (same cell id, no duplicates), like JupyterLab.
+- **Local file → import.** `jupyter_open_notebook(local_file="./x.ipynb")`
+  uploads the file to the server (under its file name) and continues it there.
+- What pi has opened is remembered in `~/.pi-jupyter/notebooks.json`
+  (contents path → kernel), so `jupyter_list_notebooks` can offer candidates in
+  a brand-new conversation even when nothing is running. Legacy anonymous
+  sessions (no `notebook` param) still auto-save to `<notebookId>.ipynb` and
+  are listed the same way; their kernels ARE cleaned up at conversation end.
+
 ## Remote auto-save
 
 After every `jupyter_repl` cell (success, error, or timeout alike) the session
@@ -170,7 +215,8 @@ src/domain/      pure core, zero external deps  (types, output, notebook, deps, 
 src/kernel/      @jupyterlab/services adapters  (port, server, kernel, convert)
 src/session.ts   RemoteSession behind KernelPort
 src/config.ts    server connection only (url/token); the kernel is agent-decided per call
-src/purposes.ts   persistent per-kernel purpose notes (~/.pi-jupyter/purposes.json)
+src/purposes.ts    persistent per-kernel purpose notes (~/.pi-jupyter/purposes.json)
+src/notebooks.ts   known-notebook registry (~/.pi-jupyter/notebooks.json) for cross-conversation resume
 extensions/      pi extension (repl, format, schemas)
 test/unit/       offline vitest suite (mock IFuture + mock KernelPort)
 test/integration live smoke test

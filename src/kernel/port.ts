@@ -47,6 +47,17 @@ export type KernelSpecList = {
   specs: KernelSpecInfo[];
 };
 
+/** A live server-side session (the /api/sessions model pi cares about). */
+export type ServerSessionModel = {
+  id: string;
+  /** Contents path the session is bound to, e.g. "notes/pi.ipynb". */
+  path: string;
+  name: string;
+  type: string;
+  kernelId: string;
+  kernelName: string;
+};
+
 /** Options for starting a kernel, optionally binding it to a Jupyter session. */
 export type StartKernelOpts = {
   /** 绑定的虚拟 notebook 路径；提供时建 /api/sessions 行，使内核出现在 Running UI。 */
@@ -54,7 +65,6 @@ export type StartKernelOpts = {
   /** Running UI 里显示的 name。 */
   sessionName?: string;
 };
-
 /** What the session needs from a live kernel. */
 export interface KernelPort {
   execute(code: string, opts?: ExecuteOptions): Promise<ExecuteOutcome>;
@@ -79,6 +89,25 @@ export interface ServerPort {
   listKernelSpecs(): Promise<KernelSpecList>;
   /** 起内核；传 opts.sessionPath 时额外建一个 session，使其出现在 Jupyter Running UI。 */
   startKernel(name: string, opts?: StartKernelOpts): Promise<KernelPort>;
+  /**
+   * Look up a LIVE session bound to `contentsPath` (GET /api/sessions).
+   * Resolves null when nothing is running there — the caller then resumes from
+   * the file with a new kernel instead of attaching.
+   */
+  findLiveSession(contentsPath: string): Promise<ServerSessionModel | null>;
+  /** All live sessions on the server (GET /api/sessions) — for listing candidates. */
+  listSessions(): Promise<ServerSessionModel[]>;
+  /**
+   * Attach a NEW client to an already-running session's kernel (no new
+   * kernel on the server — in-memory state is preserved).
+   */
+  connectToSession(model: ServerSessionModel): Promise<KernelPort>;
+  /**
+   * Read an nbformat model from a remote contents path
+   * (GET /api/contents/<path>). Resolves null when the file is missing or is
+   * not a notebook.
+   */
+  readNotebook(contentsPath: string): Promise<Record<string, unknown> | null>;
   /**
    * Write an nbformat model to a remote contents path via
    * `PUT /api/contents/<path>` (create-or-update: 201 when new, 200 when it

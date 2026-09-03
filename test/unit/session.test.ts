@@ -12,7 +12,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ShimConfig } from "../../src/config";
 import { TimeoutError } from "../../src/domain/types";
 import type { ExecuteOptions, KernelPort, ServerPort } from "../../src/kernel/port";
-import { RemoteSession } from "../../src/session";
+import { normalizeContentsPath, RemoteSession } from "../../src/session";
 
 const CONFIG: ShimConfig = {
   url: "http://x",
@@ -23,6 +23,7 @@ const CONFIG: ShimConfig = {
   installTimeoutMs: 1000,
   workingDir: "/tmp",
   timeoutRestartKernel: false,
+  keepKernels: true,
   remoteAutoSave: true,
 };
 
@@ -60,12 +61,20 @@ function makeServerPort(kernel: KernelPort): ServerPort & {
   ping: ReturnType<typeof vi.fn>;
   listKernelSpecs: ReturnType<typeof vi.fn>;
   startKernel: ReturnType<typeof vi.fn>;
+  findLiveSession: ReturnType<typeof vi.fn>;
+  listSessions: ReturnType<typeof vi.fn>;
+  connectToSession: ReturnType<typeof vi.fn>;
+  readNotebook: ReturnType<typeof vi.fn>;
   uploadNotebook: ReturnType<typeof vi.fn>;
 } {
   return {
     ping: vi.fn().mockResolvedValue(undefined),
     listKernelSpecs: vi.fn().mockResolvedValue(SPECS),
     startKernel: vi.fn().mockResolvedValue(kernel),
+    findLiveSession: vi.fn().mockResolvedValue(null),
+    listSessions: vi.fn().mockResolvedValue([]),
+    connectToSession: vi.fn().mockResolvedValue(kernel),
+    readNotebook: vi.fn().mockResolvedValue(null),
     uploadNotebook: vi.fn().mockResolvedValue(undefined),
     dispose: vi.fn(),
   };
@@ -813,5 +822,154 @@ describe("RemoteSession — agent-decided kernel", () => {
     await expect(s.initialize()).rejects.toThrow(/no kernel selected/);
     // Never touched the network/server.
     expect(server.ping).not.toHaveBeenCalled();
+  });
+});
+
+// ── resume: continue an existing notebook (attach live kernel or start bound) ──
+
+const FILE_NB = (extra: Record<string, unknown> = {}) => ({
+  nbformat: 4,
+  nbformat_minor: 5,
+  metadata: { kernelspec: { name: "python3", display_name: "Python 3", language: "python" }, language_info: { name: "python" } },
+  cells: [
+    { cell_type: "markdown", id: "md-1", metadata: {}, source: ["# analysis"] },
+    {
+      cell_type: "code",
+      id: "cell-a",
+      metadata: {},
+      source: "import numpy as np",
+      execution_count: 2,
+      outputs: [],
+    },
+  ],
+  ...extra,
+});
+
+describe("RemoteSession — resume (continue an existing notebook path)", () => {
+  let kernel: ReturnType<typeof makeKernelPort>;
+  let server: ReturnType<typeof makeServerPort>;
+
+  beforeEach(() => {
+    kernel = makeKernelPort();
+    server = makeServerPort(kernel);
+  });
+
+  it("ATTACHES to a live session: no new kernel, cells loaded, autosave bound to the path", async () => {
+    const live = {
+      id: "sess-1",
+      path: "notes/pi.ipynb",
+      name: "pi",
+      type: "notebook",
+      kernelId: "k-1",
+      kernelName: "python3",
+    };
+    server.findLiveSession.mockResolvedValue(live);
+    server.readNotebook.mockResolvedValue(FILE_NB());
+    const s = new RemoteSession(server, CONFIG, { kernelName: "ir" /* ignored on attach */ });
+    const outcome = await s.resume("notes/pi.ipynb");
+    expect(outcome.mode).toBe("attached");
+    expect(outcome.fileExisted).toBe(true);
+    expect(outcome.kernel).toBe("python3"); // the LIVE kernel wins, not the opt
+    expect(server.connectToSession).toHaveBeenCalledWith(live);
+    expect(server.startKernel).not.toHaveBeenCalled();
+    expect(s.kernelName).toBe("python3");
+    // no bootstrap on an attached kernel (state is already there)
+    expect(kernel.waitConnected).toHaveBeenCalled();
+    // code cells from the file are loaded for the model to see
+    expect(outcome.codeCells).toHaveLength(1);
+    expect(outcome.codeCells[0].source).toBe("import numpy as np");
+    expect(outcome.codeCells[0].restored).toBe(true);
+    expect(s.contentsPath).toBe("notes/pi.ipynb");
+    await s.detach();
+  });
+
+  it("attach failure falls back to starting a fresh kernel bound to the path", async () => {
+    const live = { id: "sess-x", path: "notes/pi.ipynb", name: "pi", type: "notebook", kernelId: "k-x", kernelName: "python3" };
+    server.findLiveSession.mockResolvedValue(live);
+    server.connectToSession.mockRejectedValue(new Error("kernel died"));
+    server.readNotebook.mockResolvedValue(FILE_NB());
+    const s = new RemoteSession(server, CONFIG, { contentsPath: "notes/pi.ipynb" });
+    const outcome = await s.resume("notes/pi.ipynb");
+    expect(outcome.mode).toBe("started");
+    expect(server.startKernel).toHaveBeenCalledWith(
+      "python3",
+      expect.objectContaining({ sessionPath: "notes/pi.ipynb" }),
+    );
+    expect((await s.getRuntimeStatus())?.warnings?.some((w) => w.includes("could not attach"))).toBe(true);
+  });
+
+  it("resume-from-file starts a new kernel bound to the SAME path and uses the file's kernel", async () => {
+    const file = {
+      ...FILE_NB(),
+      metadata: { kernelspec: { name: "ir", display_name: "R", language: "r" }, language_info: { name: "r" } },
+      cells: [{ cell_type: "code", id: "r-1", metadata: {}, source: "x <- 1", execution_count: 1, outputs: [] }],
+    };
+    server.readNotebook.mockResolvedValue(file);
+    const s = new RemoteSession(server, CONFIG, { contentsPath: "notes/stats.ipynb" });
+    const outcome = await s.resume("notes/stats.ipynb");
+    expect(outcome.mode).toBe("started");
+    expect(outcome.kernel).toBe("ir"); // from the file's kernelspec
+    expect(server.startKernel).toHaveBeenCalledWith("ir", { sessionPath: "notes/stats.ipynb", sessionName: "stats" });
+    expect(outcome.codeCells).toHaveLength(1);
+    // snapshot target is the adopted path even when remoteSavePath is configured
+    await s.runCell("x + 1");
+    await s.flushAutoSave();
+    expect(server.uploadNotebook.mock.calls.every((c) => c[0] === "notes/stats.ipynb")).toBe(true);
+  });
+
+  it("resume of a missing file creates the document empty at that path", async () => {
+    const s = new RemoteSession(server, CONFIG, { contentsPath: "scratch/new.ipynb" });
+    const outcome = await s.resume("scratch/new.ipynb");
+    expect(outcome.mode).toBe("started");
+    expect(outcome.fileExisted).toBe(false);
+    expect(outcome.codeCells).toEqual([]);
+    expect(server.startKernel).toHaveBeenCalledWith("python3", expect.objectContaining({ sessionPath: "scratch/new.ipynb" }));
+  });
+
+  it("re-running a restored cell executes it IN PLACE (id kept, no duplicate cell)", async () => {
+    kernel.execute.mockImplementation(async (code: string) => {
+      if (code.includes('"missing"')) {
+        return { outputs: [], status: "ok" as const, executionCount: undefined };
+      }
+      return {
+        outputs: [{ outputType: "stream", name: "stdout", text: "fresh\n" }],
+        status: "ok" as const,
+        executionCount: 5,
+      };
+    });
+    server.readNotebook.mockResolvedValue(FILE_NB());
+    const s = new RemoteSession(server, CONFIG, { contentsPath: "notes/pi.ipynb" });
+    await s.resume("notes/pi.ipynb");
+    // run the same source as the loaded cell
+    const r = await s.runCell("import numpy as np");
+    expect(r.cellId).toBe("cell-a"); // kept the file's cell id
+    await s.flushAutoSave();
+    const model = server.uploadNotebook.mock.calls.at(-1)?.[1] as { cells: any[] };
+    // markdown cell + one code cell: re-run did NOT append a duplicate
+    expect(model.cells).toHaveLength(2);
+    expect(model.cells[1].id).toBe("cell-a");
+    expect(model.cells[1].execution_count).toBe(5);
+    // the loaded cell is no longer "restored"
+    expect(s.listCells()[0].restored).toBe(false);
+  });
+
+  it("detach() keeps the kernel running (no shutdown) and disposes the client", async () => {
+    const s = new RemoteSession(server, CONFIG, { notebookId: "nb-detach" });
+    await s.initialize();
+    (kernel.shutdown as ReturnType<typeof vi.fn>).mockClear();
+    await s.detach();
+    expect(kernel.shutdown).not.toHaveBeenCalled();
+    expect(server.dispose).toHaveBeenCalled();
+    expect(s.contentsPath).toBe("nb-detach.ipynb");
+  });
+});
+
+describe("normalizeContentsPath", () => {
+  it("strips leading slashes (contents paths are relative to the root)", () => {
+    expect(normalizeContentsPath("/notes/pi.ipynb")).toBe("notes/pi.ipynb");
+  });
+  it("rejects .. segments and empty paths", () => {
+    expect(() => normalizeContentsPath("../escape.ipynb")).toThrow(/"\.\."/);
+    expect(() => normalizeContentsPath("  ")).toThrow(/required/);
   });
 });

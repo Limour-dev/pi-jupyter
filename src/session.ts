@@ -9,11 +9,17 @@
  */
 import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 import type { ShimConfig } from "./config";
 import { BOOTSTRAP_CODE, MISSING_PACKAGES_PROBE, parseMissingPackages } from "./domain/bootstrap";
 import { buildInstallCode, installProbeCode, isRepoReachable, parseInstallOutput, R_CRAN_REPO, type InstallOutputReport } from "./domain/deps";
-import { buildNotebook, type CellRecord, type NotebookMeta } from "./domain/notebook";
+import {
+  buildNotebookFromSlots,
+  notebookMetaOf,
+  parseNotebook,
+  type NotebookMeta,
+  type NotebookSlot,
+} from "./domain/notebook";
 import { stripAnsi } from "./domain/output";
 import { Subject } from "./domain/subject";
 import {
@@ -21,7 +27,9 @@ import {
   type AutoSaveInfo,
   type CellResult,
   type CreateSessionOpts,
+  type DocumentCell,
   type JsOutput,
+  type ResumeOutcome,
   type RuntimeStatus,
   type RunCellOpts,
   type Session,
@@ -46,7 +54,15 @@ const FLUSH_TIMEOUT_MS = 30_000;
 export class RemoteSession implements Session {
   readonly notebookId: string;
   /** Kernel (kernelspec name) this session runs on — agent-decided. */
-  readonly kernelName: string;
+  private _kernelName = "";
+  get kernelName(): string {
+    return this._kernelName;
+  }
+  get contentsPath(): string {
+    // effectivePath is assigned at initialize()/resume(); before that, show the
+    // path the session WILL use (the same fallback chain, unvalidated).
+    return this.effectivePath ?? this.contentsPathFallback();
+  }
 
   /** Side-channel notified after every remote auto-save attempt (FR-6.2). */
   onAutoSave?: (event: AutoSaveEvent) => void;
@@ -61,8 +77,23 @@ export class RemoteSession implements Session {
    */
   private kernelChain: Promise<void> = Promise.resolve();
   private kernelSpec: KernelSpecInfo | null = null;
+  /** Kernelspec header of the ADOPTED notebook file (used when no live spec is fetched). */
+  private adoptedMeta?: NotebookMeta;
   private execCount = 0;
-  private cells: CellRecord[] = [];
+  /**
+   * The live document: restored file cells (verbatim raw + mirrored records)
+   * followed by the cells run in this session. Serialization keeps restored,
+   * never-re-run cells byte-for-byte (`buildNotebookFromSlots`).
+   */
+  private slots: NotebookSlot[] = [];
+  /** Number of cells executed in this session (drives the autosave flush guard). */
+  private executedCells = 0;
+  /**
+   * Outcome of the latest `resume()` — how this session attached to its path
+   * ("attached" keeps the live kernel; "started" began a new one). Set by
+   * resume(); undefined for anonymous sessions.
+   */
+  resumeOutcome?: ResumeOutcome;
   /**
    * Desired environment that is KNOWN to be installed. Only a package whose
    * install succeeded is ever committed here (issue "poisoned deps set",
@@ -97,17 +128,24 @@ export class RemoteSession implements Session {
     private config: ShimConfig,
     private opts: CreateSessionOpts = {},
   ) {
-    this.notebookId =
-      opts.notebookId ?? `remote-${Date.now()}-${randomUUID().slice(0, 8)}`;
+    this.notebookId = opts.notebookId ?? notebookIdFromPath(opts.contentsPath) ?? `remote-${Date.now()}-${randomUUID().slice(0, 8)}`;
     // The kernel is chosen by the agent per call (ARCHITECTURE.md);
-    // config.kernelName is only the optional fallback default.
-    this.kernelName = opts.kernelName ?? config.kernelName ?? "";
+    // config.kernelName is only the optional fallback default. resume() may
+    // re-derive it from the adopted file / the live kernel.
+    this._kernelName = opts.kernelName ?? config.kernelName ?? "";
     for (const d of opts.dependencies ?? []) this.deps.add(d.trim());
   }
 
-  /** Kernel language (lower-cased); "python" when the kernelspec is unknown. */
+  /**
+   * Kernel language (lower-cased): the live kernelspec when known; for an
+   * attached session the adopted file's header; else a kernel-name guess.
+   */
   get language(): string {
-    return (this.kernelSpec?.language ?? "python").toLowerCase();
+    return (
+      this.kernelSpec?.language ??
+      this.adoptedMeta?.language ??
+      (this.kernelName?.toLowerCase() === "ir" ? "r" : "python")
+    ).toLowerCase();
   }
 
   /** Connect to the server, start a kernel, bootstrap, and pre-install deps. */
@@ -137,18 +175,122 @@ export class RemoteSession implements Session {
     await this.bootstrap();
     if (this.effectivePathWarning) this.warnings.push(this.effectivePathWarning);
 
-    if (this.deps.size > 0) {
-      // Commit only what actually installed; drop any name that failed so the
-      // desired set stays installable (issue "poisoned deps set"). A partial
-      // failure does not abort startup — it is surfaced as a warning instead.
-      const { installed, failed } = await this.install([...this.deps]);
-      if (failed.length) {
-        for (const p of failed) this.deps.delete(p);
-        this.warnings.push(
-          `pre-install failed for: ${failed.join(", ")}` +
-            (installed.length ? ` (installed: ${installed.join(", ")})` : ""),
+    await this.preInstallDeps();
+  }
+
+  /**
+   * Open a notebook at a remote contents path and CONTINUE it:
+   *
+   *   1. If a live /api/sessions row is bound to `path`, ATTACH to its running
+   *      kernel — no new kernel is started, so the in-memory variables from the
+   *      previous conversation/browser survive (mode "attached").
+   *   2. Otherwise start a NEW kernel bound to the same path, seeding the
+   *      document from the file's existing cells so the same file keeps growing
+   *      (mode "started"; a missing file just starts the document empty).
+   *
+   * The kernel of a fresh start comes from (in order): the agent's explicit
+   * `kernelName` opt, the kernelspec recorded in the file, the config fallback,
+   * then "python3". An attach ignores the opt — it reuses whatever kernel the
+   * live session is running.
+   */
+  async resume(contentsPath: string): Promise<ResumeOutcome> {
+    if (this.kernel) {
+      throw new Error("[pi-jupyter] session already has a kernel; close it before resuming another path");
+    }
+    const path = normalizeContentsPath(contentsPath);
+    await this.server.ping(); // bad token/unreachable → the clear hint, not a swallowed read failure
+    this.effectivePath = path;
+    // Notes gathered before a fresh kernel's bootstrap (bootstrap() resets
+    // warnings) — emitted after it so the user still sees them.
+    const resumeNotes: string[] = [];
+
+    // Best-effort read of the existing file (a hiccup must not lose the kernel).
+    let model: Record<string, unknown> | null = null;
+    try {
+      model = await this.server.readNotebook(path);
+    } catch (err) {
+      this.warnings.push(`could not read the existing notebook "${path}": ${(err as Error).message}`);
+    }
+    const parsed = parseNotebook(model);
+    this.adoptedMeta = parsed.meta;
+    this.slots = parsed.slots;
+
+    // 1) Live session on the server → attach (no new kernel, state preserved).
+    const live = (this.config.bindSession ?? true) !== false
+      ? await this.server.findLiveSession(path).catch(() => null)
+      : null;
+    if (live) {
+      try {
+        this.kernel = await this.server.connectToSession(live);
+        this._kernelName = live.kernelName || this._kernelName;
+        // An attached kernel is already bootstrapped; validate it answers.
+        await this.kernel.waitConnected();
+      } catch (err) {
+        // Stale row / kernel died between the listing and the attach: fall back
+        // to starting a fresh kernel bound to the same path.
+        resumeNotes.push(`could not attach to the live session (${(err as Error).message}); starting a fresh kernel instead`);
+        const failed = this.kernel;
+        this.kernel = null;
+        if (failed) { try { failed.dispose(); } catch { /* ignore */ } }
+      }
+    }
+    const mode = this.kernel ? "attached" : "started";
+
+    // 2) No live kernel → start one bound to the same path (resume from file).
+    if (!this.kernel) {
+      const fileKernel = this.adoptedMeta?.kernelName;
+      const requested = this.opts.kernelName ?? fileKernel ?? this.config.kernelName ?? "python3";
+      if (!requested.trim()) {
+        throw new Error(
+          "[pi-jupyter] no kernel selected for this session. Pass `kernel` (a kernelspec name " +
+            "like \"python3\" or \"ir\"), or let the notebook file decide.",
         );
       }
+      this._kernelName = requested;
+      // Validate against the server's kernelspecs before starting (UX-7).
+      this.kernelSpec = await this.resolveKernelSpec();
+      if (this.opts.kernelName && fileKernel && this.opts.kernelName !== fileKernel) {
+        resumeNotes.push(
+          `notebook "${path}" records kernel "${fileKernel}" but you asked for "${this.opts.kernelName}" — using "${this.opts.kernelName}"`,
+        );
+      }
+      this.kernel = await this.server.startKernel(this._kernelName, {
+        sessionPath: path,
+        sessionName: this.notebookId,
+      });
+      await this.kernel.waitConnected();
+      // Fresh kernel → idempotent bootstrap + missing-package warnings.
+      await this.bootstrap();
+      if (this.effectivePathWarning) this.warnings.push(this.effectivePathWarning);
+      await this.preInstallDeps();
+    }
+    for (const note of resumeNotes) this.warnings.push(note);
+
+    const outcome: ResumeOutcome = {
+      mode,
+      fileExisted: model !== null,
+      path,
+      kernel: this._kernelName,
+      codeCells: this.listCells(),
+    };
+    this.resumeOutcome = outcome;
+    return outcome;
+  }
+
+  /**
+   * Install the constructor-recorded dependencies into the kernel, committing
+   * only the successes (issue "poisoned deps set"). Shared by initialize() and
+   * the resume-from-file path.
+   */
+  private async preInstallDeps(): Promise<void> {
+    if (this.deps.size === 0) return;
+    const { installed, failed } = await this.install([...this.deps]);
+    if (failed.length) {
+      for (const p of failed) this.deps.delete(p);
+      this.warnings.push(
+        `pre-install failed for: ${failed.join(", ")}` +
+          (installed.length ? ` (installed: ${installed.join(", ")})` : ""),
+      );
     }
   }
 
@@ -177,7 +319,15 @@ export class RemoteSession implements Session {
   /** The actual cell execution; always runs under the kernel lock. */
   private async executeCell(source: string, opts: RunCellOpts): Promise<CellResult> {
     let kernel = this.requireKernel();
-    const cellId = `cell-${randomUUID().slice(0, 8)}`;
+    // In-place re-run: a restored file cell whose source matches is executed
+    // back into ITS slot (like JupyterLab re-running a cell) instead of
+    // appending a duplicate. Only the first still-restored match is targeted;
+    // identical code run again appends a new cell.
+    const restoreTarget = this.slots.find(
+      (s): s is Extract<NotebookSlot, { kind: "code" }> =>
+        s.kind === "code" && s.restored && s.source === source,
+    );
+    const cellId = restoreTarget?.cellId ?? `cell-${randomUUID().slice(0, 8)}`;
     const executionId = `exec-${randomUUID().slice(0, 8)}`;
     const timeoutMs = opts.timeoutMs ?? this.config.defaultTimeoutMs;
 
@@ -237,7 +387,16 @@ export class RemoteSession implements Session {
       ];
     }
 
-    this.cells.push({ source, result: partial });
+    if (restoreTarget) {
+      // The restored slot now carries THIS kernel's result; from here on the
+      // cell serializes from the fresh record, not the stale file raw.
+      restoreTarget.result = partial;
+      restoreTarget.restored = false;
+      restoreTarget.raw = undefined;
+    } else {
+      this.slots.push({ kind: "code", cellId, source, result: partial, restored: false });
+    }
+    this.executedCells += 1;
     this.viewChanges.next(partial);
     // Snapshot auto-save after every cell record — done/error/timeout alike
     // (FR-1.2). Runs in the background and is never awaited, so a failure can
@@ -291,7 +450,26 @@ export class RemoteSession implements Session {
    * newer one (FR-5.2).
    */
   toNotebookObject(): Record<string, unknown> {
-    return buildNotebook(this.cells, this.notebookMeta());
+    return buildNotebookFromSlots(this.slots, this.notebookMeta());
+  }
+
+  /**
+   * Ordered code cells of the live document: restored file cells first (still
+   * marked `restored`) followed by the cells run in this session. The agent
+   * uses this after resuming a notebook to decide which cells to re-run.
+   */
+  listCells(): DocumentCell[] {
+    const out: DocumentCell[] = [];
+    for (const s of this.slots) {
+      if (s.kind !== "code") continue;
+      out.push({
+        cellId: s.cellId,
+        source: s.source,
+        executionCount: s.result.executionCount,
+        restored: s.restored,
+      });
+    }
+    return out;
   }
 
   /**
@@ -322,6 +500,18 @@ export class RemoteSession implements Session {
 
   async close(): Promise<void> {
     this.disposeKernel();
+  }
+
+  /**
+   * Detach WITHOUT killing the server-side kernel/session: flush the snapshot,
+   * then drop THIS client's kernel/server connections. The kernel keeps running
+   * on the server so a later conversation (or a browser tab) can re-attach to
+   * the same contents path — used on conversation end when `keepKernels` is on.
+   */
+  async detach(): Promise<void> {
+    await this.flushAutoSave(SHUTDOWN_FLUSH_TIMEOUT_MS);
+    this.disposeKernel();
+    try { this.server.dispose(); } catch { /* ignore */ }
   }
 
   async getRuntimeStatus(): Promise<RuntimeStatus | undefined> {
@@ -448,13 +638,25 @@ export class RemoteSession implements Session {
     return parseMissingPackages(stdout);
   }
 
-  /** Notebook header metadata from the live kernelspec (BUG-2). */
+  /**
+   * Notebook header metadata: the live kernelspec when known (BUG-2); for an
+   * ATTACHED session we do not fetch a spec, so the kernelspec recorded in the
+   * adopted file is the most faithful header.
+   */
   private notebookMeta(): NotebookMeta {
     const spec = this.kernelSpec;
+    if (spec) {
+      return {
+        kernelName: spec.name,
+        displayName: spec.displayName,
+        language: spec.language.toLowerCase(),
+      };
+    }
+    if (this.adoptedMeta) return this.adoptedMeta;
     return {
-      kernelName: spec?.name ?? this.kernelName,
-      displayName: spec?.displayName ?? this.kernelName,
-      language: this.language,
+      kernelName: this.kernelName || "python3",
+      displayName: this.kernelName || "Python 3",
+      language: this.kernelName?.toLowerCase() === "ir" ? "r" : "python",
     };
   }
 
@@ -468,11 +670,15 @@ export class RemoteSession implements Session {
    * never consulted here (red line, §9.2).
    */
   private computeEffectivePath(): string {
+    // An explicitly requested contents path (notebook adoption / creation)
+    // wins over the config override — resuming `notes/pi.ipynb` must keep
+    // snapshotting exactly that file even when remoteSavePath is set.
+    if (this.opts.contentsPath) return normalizeContentsPath(this.opts.contentsPath);
     const fallback = `${this.notebookId}.ipynb`;
     const raw = this.config.remoteSavePath;
     if (!raw) return fallback;
     // Contents paths are relative to root_dir — drop any leading slashes.
-    const relative = raw.replace(/^\/+/, "");
+    const relative = raw.replace(/^\/+/g, "");
     if (relative.split("/").some((segment) => segment === "..")) {
       // bootstrap() resets this.warnings, so keep the warning for re-append.
       this.effectivePathWarning =
@@ -481,6 +687,12 @@ export class RemoteSession implements Session {
       return fallback;
     }
     return relative;
+  }
+
+  /** Same chain as computeEffectivePath, unvalidated — display before init. */
+  private contentsPathFallback(): string {
+    if (this.opts.contentsPath) return this.opts.contentsPath;
+    return this.config.remoteSavePath ?? `${this.notebookId}.ipynb`;
   }
 
   /**
@@ -538,7 +750,7 @@ export class RemoteSession implements Session {
    */
   async flushAutoSave(timeoutMs: number = FLUSH_TIMEOUT_MS): Promise<void> {
     if (!this.config.remoteAutoSave) return;
-    if (this.cells.length > 0) {
+    if (this.executedCells > 0) {
       this.autoSaveDirty = true;
       this.pumpAutoSave();
     }
@@ -604,6 +816,31 @@ export class RemoteSession implements Session {
     this.kernel?.dispose();
     this.kernel = null;
   }
+}
+
+/**
+ * Normalize a user-supplied remote contents path: relative to the contents
+ * root (leading slashes dropped), no `..` segments, non-empty. Throws on an
+ * invalid path — resuming an explicit notebook path must never silently fall
+ * back the way a mis-configured `remoteSavePath` does.
+ */
+export function normalizeContentsPath(path: string): string {
+  const raw = path.trim();
+  if (!raw) throw new Error("[pi-jupyter] a notebook contents path is required");
+  const relative = raw.replace(/^\/+/g, "");
+  if (!relative) throw new Error(`[pi-jupyter] invalid notebook path "${raw}"`);
+  if (relative.split("/").some((segment) => segment === "..")) {
+    throw new Error(`[pi-jupyter] notebook path "${raw}" contains a ".." segment — not allowed`);
+  }
+  return relative;
+}
+
+/** Human-friendly session id for a contents path: `notes/pi.ipynb` → `pi`. */
+function notebookIdFromPath(path: string | undefined): string | undefined {
+  if (!path) return undefined;
+  const file = basename(path.replace(/\\/g, "/"));
+  const name = file.replace(/\.ipynb$/i, "");
+  return name && name !== "." ? name : undefined;
 }
 
 /**

@@ -13,6 +13,7 @@
  * never set init.headers for auth here.
  */
 import { KernelManager, ServerConnection, SessionManager } from "@jupyterlab/services";
+import type { Session } from "@jupyterlab/services";
 import { createRequire } from "node:module";
 import type { ShimConfig } from "../config";
 import { JupyterKernel } from "./kernel";
@@ -21,6 +22,7 @@ import type {
   KernelSpecInfo,
   KernelSpecList,
   ServerPort,
+  ServerSessionModel,
   StartKernelOpts,
 } from "./port";
 
@@ -96,17 +98,7 @@ export class JupyterServer implements ServerPort {
   async startKernel(name: string, opts?: StartKernelOpts): Promise<KernelPort> {
     const bind = this.config.bindSession ?? true;
     if (bind && opts?.sessionPath) {
-      // 懒建 SessionManager（构造时会自带/复用 KernelManager，仅 serverSettings 即可）。
-      const mgr = (this.sessions ??= new SessionManager({
-        serverSettings: this.settings,
-        kernelManager: this.kernels,
-      }));
-      const session = await mgr.startNew({
-        path: opts.sessionPath,
-        name: opts.sessionName ?? opts.sessionPath,
-        type: "notebook",
-        kernel: { name },
-      });
+      const session = await this.startBoundSession(opts.sessionPath, opts.sessionName, name);
       const k = session.kernel;
       if (!k) throw new Error("[pi-jupyter] session started without a kernel connection");
       return new JupyterKernel(k, session);
@@ -115,6 +107,104 @@ export class JupyterServer implements ServerPort {
     return new JupyterKernel(connection);
   }
 
+  async findLiveSession(contentsPath: string): Promise<ServerSessionModel | null> {
+    if ((this.config.bindSession ?? true) === false) return null; // no rows in bind-off mode
+    const all = await this.listSessions();
+    return all.find((s) => s.path === contentsPath) ?? null;
+  }
+
+  async listSessions(): Promise<ServerSessionModel[]> {
+    if ((this.config.bindSession ?? true) === false) return []; // no rows in bind-off mode
+    const res = await ServerConnection.makeRequest(
+      `${this.settings.baseUrl}api/sessions`,
+      { method: "GET" },
+      this.settings,
+    );
+    if (!res.ok) {
+      throw new Error(
+        `[pi-jupyter] could not list sessions: HTTP ${res.status} ${res.statusText}`,
+      );
+    }
+    const body = (await res.json()) as Array<
+      {
+        id?: string;
+        path?: string;
+        name?: string;
+        type?: string;
+        kernel?: { id?: string; name?: string } | null;
+      } | undefined
+    >;
+    const out: ServerSessionModel[] = [];
+    for (const s of body ?? []) {
+      if (!s?.id || !s.kernel?.id) continue;
+      out.push({
+        id: s.id,
+        path: s.path ?? "",
+        name: s.name ?? s.path ?? "",
+        type: s.type ?? "notebook",
+        kernelId: s.kernel.id,
+        kernelName: s.kernel.name ?? "",
+      });
+    }
+    return out;
+  }
+
+  async connectToSession(model: ServerSessionModel): Promise<KernelPort> {
+    // Same SessionManager as the bind path; connectTo attaches a NEW client to
+    // the RUNNING session — no kernel is started on the server.
+    const mgr = this.ensureSessionManager();
+    const session = mgr.connectTo({
+      model: {
+        id: model.id,
+        name: model.name,
+        path: model.path,
+        type: model.type,
+        kernel: { id: model.kernelId, name: model.kernelName },
+      },
+    });
+    const k = session.kernel;
+    if (!k) throw new Error("[pi-jupyter] attached session has no kernel connection");
+    return new JupyterKernel(k, session);
+  }
+
+  async readNotebook(contentsPath: string): Promise<Record<string, unknown> | null> {
+    const url = `${this.settings.baseUrl}api/contents/${encodeContentsPath(contentsPath)}`;
+    const res = await ServerConnection.makeRequest(url, { method: "GET" }, this.settings);
+    if (res.status === 404) return null;
+    if (!res.ok) {
+      throw new Error(
+        `[pi-jupyter] could not read notebook: HTTP ${res.status} ${res.statusText}`,
+      );
+    }
+    const body = (await res.json()) as { type?: string; content?: Record<string, unknown> } | null;
+    if (body?.type !== "notebook" || !body.content) return null;
+    return body.content;
+  }
+
+  // ── shared session helpers (bind mode) ─────────────────────────────────────
+
+  /** 懒建 SessionManager（构造时会自带/复用 KernelManager，仅 serverSettings 即可）。 */
+  private ensureSessionManager(): SessionManager {
+    return (this.sessions ??= new SessionManager({
+      serverSettings: this.settings,
+      kernelManager: this.kernels,
+    }));
+  }
+
+  /** Start a NEW kernel bound to a session row at `path` (Running UI + autosave target). */
+  private async startBoundSession(
+    path: string,
+    name: string | undefined,
+    kernelName: string,
+  ): Promise<Session.ISessionConnection> {
+    const mgr = this.ensureSessionManager();
+    return mgr.startNew({
+      path,
+      name: name ?? path,
+      type: "notebook",
+      kernel: { name: kernelName },
+    });
+  }
   /**
    * Write an nbformat model to the remote Contents API (FR-2):
    * `PUT /api/contents/<path>` is create-or-update (201 new / 200 existing).

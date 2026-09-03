@@ -90,3 +90,15 @@ describe("isConfigured", () => {
     expect(isConfigured({ JUPYTER_REMOTE_URL: "http://x" })).toBe(false);
   });
 });
+
+describe("keepKernels (notebook continuity policy)", () => {
+  it("defaults to true", () => {
+    expect(loadConfig(BASE).keepKernels).toBe(true);
+  });
+  it("JUPYTER_KEEP_KERNELS=0 disables (legacy kill-on-exit)", () => {
+    expect(loadConfig({ ...BASE, JUPYTER_KEEP_KERNELS: "0" }).keepKernels).toBe(false);
+  });
+  it("JUPYTER_KEEP_KERNELS=1 enables", () => {
+    expect(loadConfig({ ...BASE, JUPYTER_KEEP_KERNELS: "1" }).keepKernels).toBe(true);
+  });
+});

@@ -52,7 +52,11 @@ one idea: **hexagonal architecture (ports & adapters)**.
 **Dependency rule:** arrows point inward only. `domain/` imports nothing
 external; `kernel/` is the only layer that imports `@jupyterlab/services`;
 `session.ts` imports `domain/` + the `KernelPort` *interface* but never the
-adapter; `extensions/` is the composition root — it depends on the `Session` interface but wires the concrete `RemoteSession` and `JupyterServer`.
+adapter; `extensions/` is the composition root — it depends on the `Session` interface but wires the concrete `RemoteSession` and `JupyterServer`. Two tiny
+JSON stores sit at application level next to `session.ts`: `src/purposes.ts`
+(what each kernel is FOR) and `src/notebooks.ts` (which notebook contents
+paths pi has opened) — both are written by tools and read by the list tools;
+neither ever selects a session.
 
 ### Why the seam matters
 
@@ -95,10 +99,12 @@ Consequences encoded in the code:
 - `ShimConfig.kernelName` is optional and is **only a fallback default** for
   calls that omit `kernel` (default → server default kernelspec → `python3`).
   It never overrides an explicit agent choice.
-- Sessions are keyed **per kernel** (`Map<kernelName, Session>` in the
-  extension): each kernel runs its own `RemoteSession` (own kernel, own
-  notebookId, own auto-save target), so switching python3 ↔ R back and forth
-  never loses either kernel's state.
+- Sessions are keyed **per kernel** (`Map<kernelName, Session>`) when a call
+  passes no `notebook` — each anonymous kernel keeps its own `RemoteSession`
+  (own kernel, own notebookId, own auto-save target), so switching python3 ↔ R
+  back and forth never loses either kernel's state. Calls that NAME a notebook
+  get a session keyed by its remote contents path (`Map<path, Session>`) — the
+  path, not the kernel, is that session's identity (see the next section).
 - `RemoteSession` receives the chosen kernel via `CreateSessionOpts.kernelName`
   and exposes it as `Session.kernelName` (surfaced in every tool result's
   `details.kernel`), so the agent can see which kernel actually ran. A
@@ -111,6 +117,88 @@ Consequences encoded in the code:
   by `jupyter_set_kernel_purpose`. The store only carries the user's
   EXPLANATION — it never selects a kernel, so the agent's per-call decision
   (step 3) stays the single source of truth.
+
+## Sessions, notebooks, and continuation across conversations
+
+A pi conversation's state lives in the pi process and dies with it; the only
+things that survive are (a) the notebook FILES on the server and (b) kernels
+that keep running on the server. v2.6 makes both first-class so a NEW
+conversation can continue earlier work — and, when the kernel is still alive,
+**without starting or restarting a kernel at all**.
+
+### The notebook path is the session's identity
+
+A notebook session is bound to a **remote contents path** (e.g.
+`notes/pi.ipynb`) — the same string is the `/api/sessions` bind row, the
+auto-save target, and the file the user opens in JupyterLab. `RemoteSession`
+adopts a path via `resume(contentsPath)`:
+
+1. **Live session → ATTACH.** `ServerPort.findLiveSession(path)` scans
+   `GET /api/sessions`; when a row is bound to the path, `connectToSession()`
+   adds a *new client* to the RUNNING kernel (`SessionManager.connectTo`).
+   No kernel is started — in-memory variables from the earlier session or the
+   browser survive. Attach failures (stale row, dead kernel) fall back to (2)
+   with a warning instead of erroring out.
+2. **File present → RESUME.** The `.ipynb` is read
+   (`ServerPort.readNotebook`, contents GET) and parsed into a **document of
+   slots** (`domain/notebook.ts` `parseNotebook`): code cells become
+   `{kind:"code", record, restored:true, raw}` slots, every non-code cell
+   (markdown/raw) is preserved VERBATIM as `{kind:"other", raw}`. A NEW kernel
+   is then started **bound to the same path** (`sessionPath: path`), so the
+   auto-save keeps growing exactly that file.
+3. **No file → CREATE.** Same as (2) with an empty document; the first
+   auto-save materializes the file at the path.
+
+Which kernel serves a resumed notebook: the live row's kernel when attaching;
+otherwise the agent's explicit `kernel` param → the kernelspec recorded in the
+file → `config.kernelName` → `python3` (a mismatch between an explicit param
+and the file's kernel is a warning, not an override). `Session.contentsPath`
+and `Session.listCells()` (restored + run cells, in document order) let the
+tool layer tell the agent exactly what is there and what to re-run.
+
+### Re-running restored cells happens IN PLACE
+
+`runCell` first looks for a still-`restored` code slot whose source matches;
+if found, the execution lands back in THAT slot (same cell id, outputs
+replaced, `raw` dropped so the fresh result serializes) — the notebook keeps
+one copy per logical cell, like JupyterLab. Non-matching code appends a new
+code slot. So resuming a file with a fresh kernel and re-running the setup
+cells does not duplicate the document.
+
+### Kernel lifecycle: keep-alive for named notebooks (default)
+
+Continuation is only possible if the kernel survives the conversation, so the
+`session_shutdown` cleanup now **detaches** instead of shutting down:
+`RemoteSession.detach()` flushes the final snapshot and disposes this client's
+connections but leaves the server-side kernel/session row running. Scope:
+
+- **Named notebook sessions** (opened via `jupyter_open_notebook` /
+  `notebook=` / a path in `jupyter_repl`) are detached by default
+  (`config.keepKernels`, env `JUPYTER_KEEP_KERNELS=0` restores kill-on-exit
+  for them). The kernel keeps running until `jupyter_shutdown_notebook`,
+  `/jupyter-reset`, a server-side restart, or the server stops — exactly the
+  JupyterLab mental model, so the browser and a later pi conversation attach to
+  the SAME kernel.
+- **Anonymous per-kernel sessions** (no notebook path, random
+  `<notebookId>.ipynb` targets) are ALWAYS shut down at conversation end — one
+  per conversation would otherwise pile random kernels up on the server
+  between `/jupyter-reset` runs. Their auto-saved files remain resumable
+  content-wise.
+
+### Discovery: the notebooks registry
+
+`src/notebooks.ts` keeps `~/.pi-jupyter/notebooks.json` (contents path →
+`{kernelName, updated, source, localFile?}`), written whenever a session opens
+(atomic tmp+rename, like `purposes.json`). `jupyter_list_notebooks` merges it
+with the server's LIVE `/api/sessions` rows (`ServerPort.listSessions`) and
+annotates every candidate: **LIVE kernel → attach, variables kept** vs
+**file only → resume with a new kernel (re-run setup cells)**. A brand-new
+conversation — empty session map, no in-memory state — therefore still knows
+what it can continue. `jupyter_open_notebook` accepts a remote path or a local
+`.ipynb` (imported under its file name via the contents PUT) and returns the
+mode + the loaded code cells so the agent can rebuild state. `jupyter_repl`,
+`jupyter_add_dependencies` and `jupyter_save_notebook` all accept the same
+`notebook` path.
 
 ## Decisions carried over from v1 (and why)
 
@@ -126,6 +214,16 @@ Consequences encoded in the code:
   arrive. This is the correct protocol and we did not change it.
 - **Tables degrade to text.** Remote Jupyter never emits nteract's proprietary
   table MIME types, so we get text fallback for free — no DataTable port.
+- **Kernels outlive the client (named notebooks).** v1's "no orphan kernels on
+  exit" existed because nothing could re-attach a kernel. v2.6 makes kernels
+  the server-side continuation point (`ServerPort.findLiveSession` /
+  `connectToSession`), so "leaving a kernel running" stops being a leak and
+  becomes the resume path — with explicit cleanup (`/jupyter-reset`,
+  `jupyter_shutdown_notebook`) and an opt-out (`JUPYTER_KEEP_KERNELS=0`).
+- **nbformat is parsed as well as written.** Serializing was one-way in v1.
+  Resuming a file requires the inverse — `domain/notebook.ts` now owns both
+  directions (cells → nbformat, nbformat → slots → cells) and the round-trip
+  is unit-tested, so adopted notebooks never lose markdown/raw cells.
 
 ## Lessons encoded in the code
 
@@ -143,7 +241,7 @@ Each is a comment at the relevant site, all verified against a live server:
 
 | Layer | Tool | Needs a server? |
 |-------|------|:---:|
-| `test/unit/` | vitest, mock `IFuture` + mock `KernelPort` | **No** |
+| `test/unit/` | vitest, mock `IFuture` + mock `KernelPort`/`ServerPort` (incl. notebook parsing, resume attach/start, registry) | **No** |
 | `test/integration/smoke.test.ts` | node --import tsx, real server | Yes |
 
 `npm test` runs the offline suite; `npm run test:integration` runs the live

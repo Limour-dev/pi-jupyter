@@ -18,9 +18,11 @@
  * parameter. `kernelName` below is kept ONLY as an optional fallback default
  * for tool calls that omit `kernel`; it never overrides the agent's choice.
  *
- * Optional extras: JUPYTER_WORKING_DIR (base for relative save paths) and
+ * Optional extras: JUPYTER_WORKING_DIR (base for relative save paths),
  * JUPYTER_TIMEOUT_RESTART_KERNEL=1 (auto-restart a kernel still busy after a
- * timeout).
+ * timeout), and JUPYTER_KEEP_KERNELS=0 (legacy: kill named-notebook kernels
+ * when a pi conversation ends; default keeps them running on the server so a
+ * new conversation can re-attach to the same notebook and keep its variables).
  */
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -44,6 +46,13 @@ export interface ShimConfig {
   timeoutRestartKernel: boolean;
   /** 把内核绑到 /api/sessions 行，使其出现在 Jupyter Running UI。缺省 true。 */
   bindSession?: boolean;
+  /**
+   * Keep kernels running on the server when a pi conversation/process ends
+   * (detach instead of shutdown) so a later conversation — or the browser — can
+   * re-attach to the same notebook and its in-memory variables. Default true;
+   * set JUPYTER_KEEP_KERNELS=0 for the legacy kill-on-exit behavior.
+   */
+  keepKernels: boolean;
   /** 每次 jupyter_repl 结束后自动把快照落盘到远端。缺省 true（FR-7.1）。 */
   remoteAutoSave: boolean;
   /** 远端 contents 相对 path，覆盖默认的 `${notebookId}.ipynb`（FR-3.4）。 */
@@ -106,6 +115,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       env.JUPYTER_BIND_SESSION === "1" ? true
       : env.JUPYTER_BIND_SESSION === "0" ? false
       : (file.bindSession as boolean | undefined),
+    keepKernels:
+      env.JUPYTER_KEEP_KERNELS === "0" ? false
+      : env.JUPYTER_KEEP_KERNELS === "1" ? true
+      : (file.keepKernels as boolean | undefined) ?? true,
     remoteAutoSave:
       env.JUPYTER_REMOTE_AUTOSAVE === "0" ? false
       : env.JUPYTER_REMOTE_AUTOSAVE === "1" ? true

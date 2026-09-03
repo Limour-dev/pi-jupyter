@@ -19,11 +19,25 @@ const KERNEL = Type.Optional(
   }),
 );
 
+/**
+ * Optional shared `notebook` param — the remote contents path of a notebook
+ * to CONTINUE (attach to its live kernel, or resume its file). Sessions are
+ * per notebook path: each path keeps its own kernel and auto-save target.
+ */
+const NOTEBOOK = Type.Optional(
+  Type.String({
+    description:
+      "Remote contents path of an existing notebook to continue, e.g. \"notes/pi.ipynb\" (list them with jupyter_list_notebooks). " +
+        "Omit to target the kernel's own anonymous session instead.",
+  }),
+);
+
 export const JUPYTER_PARAMS = Type.Object({
   kernel: KERNEL,
+  notebook: NOTEBOOK,
   code: Type.String({
     description:
-      "Python source to execute in the persistent remote notebook session. Use print(...) for side effects; the last expression's repr is returned as the result.",
+      "Python source to execute in the persistent remote notebook session. Use print(...) for side effects; the last expression's repr is returned as the result. To re-run a cell restored from an existing notebook, pass its exact source — it executes in place (same cell id) instead of appending a duplicate.",
   }),
   dependencies: Type.Optional(
     Type.Array(Type.String(), {
@@ -41,6 +55,7 @@ export const JUPYTER_PARAMS = Type.Object({
 
 export const ADD_DEPENDENCIES_PARAMS = Type.Object({
   kernel: KERNEL,
+  notebook: NOTEBOOK,
   packages: Type.Array(Type.String(), {
     description: "Package specs (e.g. ['matplotlib', 'pandas>=2']).",
   }),
@@ -48,12 +63,38 @@ export const ADD_DEPENDENCIES_PARAMS = Type.Object({
 
 export const SAVE_NOTEBOOK_PARAMS = Type.Object({
   kernel: KERNEL,
+  notebook: NOTEBOOK,
   path: Type.Optional(
     Type.String({
       description:
         "File path to save to (e.g. './analysis.ipynb'). Prefer an absolute path or ~/; relative paths resolve against the current working directory. If omitted, saves to <notebook-id>.ipynb in the working directory.",
     }),
   ),
+});
+
+export const OPEN_NOTEBOOK_PARAMS = Type.Object({
+  path: Type.Optional(
+    Type.String({
+      description:
+        "Remote contents path of the notebook to open/continue on the Jupyter Server, e.g. \"notes/pi.ipynb\" (as shown by jupyter_list_notebooks). One of `path` or `local_file` is required.",
+    }),
+  ),
+  local_file: Type.Optional(
+    Type.String({
+      description:
+        "Local .ipynb file to IMPORT into the server (under its file name at the contents root) and then continue as the remote notebook. One of `path` or `local_file` is required.",
+    }),
+  ),
+  kernel: KERNEL,
+});
+
+export const LIST_NOTEBOOKS_PARAMS = Type.Object({});
+
+export const SHUTDOWN_NOTEBOOK_PARAMS = Type.Object({
+  path: Type.String({
+    description:
+      "Remote contents path of the notebook to shut down (kill its kernel and drop the session) — e.g. \"notes/pi.ipynb\".",
+  }),
 });
 
 export const LIST_KERNELS_PARAMS = Type.Object({});
@@ -72,4 +113,6 @@ export const SET_KERNEL_PURPOSE_PARAMS = Type.Object({
 export type JupyterParams = Static<typeof JUPYTER_PARAMS>;
 export type AddDependenciesParams = Static<typeof ADD_DEPENDENCIES_PARAMS>;
 export type SaveNotebookParams = Static<typeof SAVE_NOTEBOOK_PARAMS>;
+export type OpenNotebookParams = Static<typeof OPEN_NOTEBOOK_PARAMS>;
+export type ShutdownNotebookParams = Static<typeof SHUTDOWN_NOTEBOOK_PARAMS>;
 export type SetKernelPurposeParams = Static<typeof SET_KERNEL_PURPOSE_PARAMS>;

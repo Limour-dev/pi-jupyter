@@ -2,9 +2,10 @@
   "$comment": "Copy to ~/.pi-jupyter/config.json — env vars take precedence over this file.",
   "$comment.kernelName": "OPTIONAL fallback default kernel ONLY. Which kernel (python3 / ir / …) runs the code is normally discovered at runtime by the agent (jupyter_list_kernels) and chosen per call via the `kernel` parameter — it is NOT selected here. This field is used only when a tool call omits `kernel`. Must be a kernelspec *name* (see GET /api/kernelspecs): e.g. \"python3\", or \"ir\" for R — NOT a display name like \"R\".",
   "$comment.purposes": "What each kernel is for lives SEPARATELY in ~/.pi-jupyter/purposes.json (a JSON map like {\"python3\": \"data analysis\"}). The agent records it with jupyter_set_kernel_purpose after you explain a new kernel; you may also edit that file by hand. It only describes kernels, never selects one.",
-  "$comment.extras": "Optional fields: \"workingDir\": \"/path/to/project\" (base for relative save paths), \"timeoutRestartKernel\": true (auto-restart a kernel still busy after a timeout; state is lost), and \"bindSession\": true (bind the kernel to an /api/sessions row so it shows up in the Jupyter Running UI; defaults to true).",
-  "$comment.remoteAutoSave": "After each jupyter_repl cell, automatically upload the notebook snapshot to the remote server (Contents API). Defaults to true; set false to disable. The file lands at the contents root == the remote $HOME in a default deployment, under <notebookId>.ipynb, so opening it in a browser reuses the SAME kernel.",
-  "$comment.remoteSavePath": "Override the remote contents path, e.g. \"notes/pi.ipynb\" (sub-directories are created automatically). Empty string == default <notebookId>.ipynb. \"..\" segments are rejected.",
+  "$comment.notebooks": "Which notebooks pi has opened is remembered in ~/.pi-jupyter/notebooks.json (contents path -> kernel/last-used). jupyter_list_notebooks merges it with the server's live sessions so a NEW conversation can continue a notebook — attaching to its still-running kernel when there is one, otherwise resuming its file with a new kernel bound to the same path.",
+  "$comment.extras": "Optional fields: \"workingDir\": \"/path/to/project\" (base for relative save paths), \"timeoutRestartKernel\": true (auto-restart a kernel still busy after a timeout; state is lost), \"bindSession\": true (bind the kernel to an /api/sessions row so it shows up in the Jupyter Running UI; defaults to true), and \"keepKernels\": false (kill named-notebook kernels when the pi conversation ends instead of leaving them running for re-attach; defaults to true).",
+  "$comment.remoteAutoSave": "After each jupyter_repl cell, automatically upload the notebook snapshot to the remote server (Contents API). Defaults to true; set false to disable. The file lands at the contents root == the remote $HOME in a default deployment, under <notebookId>.ipynb (or under a path you opened with jupyter_open_notebook), so opening it in a browser reuses the SAME kernel.",
+  "$comment.remoteSavePath": "Override the remote contents path for anonymous sessions, e.g. \"notes/pi.ipynb\" (sub-directories are created automatically). Empty string == default <notebookId>.ipynb. \"..\" segments are rejected. NOTE: when a notebook is opened at an explicit path (jupyter_open_notebook / `notebook` param), that path wins over this override so the resume target never drifts.",
   "url": "http://192.168.105.1:57002",
   "token": "your-token-here",
   "kernelName": "python3",
@@ -12,6 +13,7 @@
   "defaultTimeoutMs": 300000,
   "installTimeoutMs": 600000,
   "bindSession": true,
+  "keepKernels": true,
   "remoteAutoSave": true,
   "remoteSavePath": ""
 }

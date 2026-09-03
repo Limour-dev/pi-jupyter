@@ -73,7 +73,8 @@ export type CreateSessionOpts = {
   /**
    * The kernel (kernelspec name, e.g. "python3" / "ir") this session runs on.
    * The agent picks it per call (ARCHITECTURE.md); when omitted, RemoteSession
-   * falls back to `ShimConfig.kernelName`.
+   * falls back to `ShimConfig.kernelName` — or, when resuming an existing
+   * notebook, to the kernelspec recorded in that file.
    */
   kernelName?: string;
   workingDir?: string;
@@ -81,6 +82,12 @@ export type CreateSessionOpts = {
   description?: string;
   dependencies?: string[];
   notebookId?: string;
+  /**
+   * Remote contents path this session is bound to (the /api/sessions row AND
+   * the auto-save target). When set, it wins over `remoteSavePath` so a
+   * resumed notebook keeps growing as exactly that file.
+   */
+  contentsPath?: string;
 };
 
 export type RuntimeStatus = {
@@ -116,6 +123,11 @@ export interface Session {
   readonly notebookId: string;
   /** Kernel (kernelspec name) this session runs on, as decided by the agent. */
   readonly kernelName: string;
+  /**
+   * Remote contents path this session lives at — the /api/sessions bind row and
+   * the auto-save target (anonymous sessions default to `<notebookId>.ipynb`).
+   */
+  readonly contentsPath: string;
   runCell(code: string, opts?: RunCellOpts): Promise<CellResult>;
   addDependencies(packages: string[]): Promise<void>;
   /**
@@ -129,6 +141,21 @@ export interface Session {
   saveNotebook(path?: string): Promise<string>;
   shutdown(): Promise<void>;
   close(): Promise<void>;
+  /**
+   * Detach WITHOUT killing the server-side kernel/session row: flush the
+   * snapshot, then drop this client's connections. The kernel keeps running so
+   * a later conversation (or the browser) can re-attach to the same path.
+   * This is what pi calls on conversation end when `keepKernels` is on.
+   */
+  detach(): Promise<void>;
+  /** Ordered code cells of the live document (file-restored + run this session). */
+  listCells(): DocumentCell[];
+  /**
+   * How this session attached to its contents path (set by resume(); undefined
+   * for anonymous sessions): "attached" reused a live kernel, "started" began
+   * a new one.
+   */
+  readonly resumeOutcome?: ResumeOutcome;
   getRuntimeStatus(): Promise<RuntimeStatus | undefined>;
   readonly executionViewChanges$: ObservableLike<CellResult>;
   /**
@@ -137,6 +164,31 @@ export interface Session {
    */
   onAutoSave?: (event: AutoSaveEvent) => void;
 }
+
+/** One code cell of a session's live document (see {@link Session.listCells}). */
+export type DocumentCell = {
+  /** Cell id as saved in the notebook (kept across in-place re-runs). */
+  cellId: string;
+  source: string;
+  executionCount?: number;
+  /** True while the cell came from the file and has not run on this kernel yet. */
+  restored: boolean;
+};
+
+/** How {@link RemoteSession.resume} attached to a notebook path. */
+export type ResumeMode = "attached" | "started";
+
+export type ResumeOutcome = {
+  mode: ResumeMode;
+  /** False when no file existed at the path — the document started empty. */
+  fileExisted: boolean;
+  /** The adopted contents path. */
+  path: string;
+  /** Kernel now serving this session (the live kernel, or the newly started one). */
+  kernel: string;
+  /** Code cells restored from the existing file, in document order. */
+  codeCells: DocumentCell[];
+};
 
 // ── Errors ──────────────────────────────────────────────────────────────────
 

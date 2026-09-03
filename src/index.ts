@@ -24,13 +24,24 @@ export {
   TimeoutError,
 } from "./domain/types";
 export { dedupeImages, denormalizeMimebundle, isRasterImage, normalizeMimebundle } from "./domain/output";
-export { buildNotebook, splitLines, type CellRecord } from "./domain/notebook";
+export {
+  buildNotebook,
+  buildNotebookFromSlots,
+  notebookMetaOf,
+  parseNotebook,
+  serializeCodeCell,
+  splitLines,
+  type CellRecord,
+  type NotebookMeta,
+  type NotebookSlot,
+  type ParsedNotebook,
+} from "./domain/notebook";
 export { buildInstallCode } from "./domain/deps";
 export { BOOTSTRAP_CODE, MISSING_PACKAGES_PROBE, parseMissingPackages } from "./domain/bootstrap";
 export { Subject } from "./domain/subject";
 
 // ── kernel (adapters) ───────────────────────────────────────────────────────
-export type { ExecuteOptions, ExecuteOutcome, KernelPort, ServerPort } from "./kernel/port";
+export type { ExecuteOptions, ExecuteOutcome, KernelPort, ServerPort, ServerSessionModel } from "./kernel/port";
 export { JupyterKernel } from "./kernel/kernel";
 export { JupyterServer } from "./kernel/server";
 export { fromIOPub } from "./kernel/convert";
@@ -38,4 +49,13 @@ export { fromIOPub } from "./kernel/convert";
 // ── config + session + purpose notes ───────────────────────────────────────
 export { isConfigured, loadConfig, type ShimConfig } from "./config";
 export { loadPurposes, savePurposes, purposesFilePath, type KernelPurposes } from "./purposes";
-export { RemoteSession } from "./session";
+export {
+  forgetNotebook,
+  loadNotebooks,
+  notebooksFilePath,
+  saveNotebooks,
+  touchNotebook,
+  type NotebookRecord,
+  type NotebooksStore,
+} from "./notebooks";
+export { RemoteSession, normalizeContentsPath } from "./session";
