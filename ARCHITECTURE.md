@@ -29,16 +29,16 @@ one idea: **hexagonal architecture (ports & adapters)**.
 │    format.ts              CellResult → pi message content             │
 │    schemas.ts             TypeBox parameter schemas                   │
 └───────────────┬───────────────────────────────────────────────────────┘
-                │ depends on  Session  (interface)
+                │ wires  RemoteSession + JupyterServer  (composition root)
 ┌───────────────▼───────────────────────────────────────────────────────┐
-│  src/session.ts + src/config.ts        application                    │
+│  src/session.ts + src/config.ts + src/purposes.ts  application        │
 │    RemoteSession implements Session behind a KernelPort               │
 └───────────────┬───────────────────────────────────────────────────────┘
                 │ depends on  KernelPort / ServerPort  (interfaces)
 ┌───────────────▼───────────────────────────────────────────────────────┐
 │  src/kernel/            adapters (ALL @jupyterlab/services lives here)│
 │    port.ts                KernelPort / ServerPort — the seam          │
-│    server.ts              ServerConnection + KernelManager            │
+│    server.ts         ServerConnection + KernelManager + SessionManager│
 │    kernel.ts              dual-channel executor (IFuture)             │
 │    convert.ts             KernelMessage → JsOutput                    │
 └───────────────┬───────────────────────────────────────────────────────┘
@@ -52,7 +52,7 @@ one idea: **hexagonal architecture (ports & adapters)**.
 **Dependency rule:** arrows point inward only. `domain/` imports nothing
 external; `kernel/` is the only layer that imports `@jupyterlab/services`;
 `session.ts` imports `domain/` + the `KernelPort` *interface* but never the
-adapter; `extensions/` imports the `Session` *interface*.
+adapter; `extensions/` is the composition root — it depends on the `Session` interface but wires the concrete `RemoteSession` and `JupyterServer`.
 
 ### Why the seam matters
 
@@ -144,13 +144,13 @@ Each is a comment at the relevant site, all verified against a live server:
 | Layer | Tool | Needs a server? |
 |-------|------|:---:|
 | `test/unit/` | vitest, mock `IFuture` + mock `KernelPort` | **No** |
-| `test/integration/smoke.test.ts` | tsx, real server | Yes |
+| `test/integration/smoke.test.ts` | node --import tsx, real server | Yes |
 
 `npm test` runs the offline suite; `npm run test:integration` runs the live
 one. v1 had only the live smoke test — the offline suite is new.
 
 ## Build
 
-`npm run build` (tsup) emits `dist/index.{js,cjs,d.ts}` from `src/index.ts`
+`npm run build` (tsup) emits ESM/CJS bundles and type declarations from `src/index.ts`
 for consumers who want the library API. The pi extension itself is loaded
 from `.ts` source via `package.json` → `pi.extensions`.

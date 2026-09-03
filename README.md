@@ -11,6 +11,7 @@ rationale and the lessons carried over from v1.
 
 - `jupyter_repl` — persistent remote Jupyter kernel; state survives between calls
 - `jupyter_list_kernels` — discover the kernels (python3, ir, …) on the server; shows each kernel's recorded purpose and flags new ones with none
+- `jupyter_add_dependencies` — hot-install packages into a running kernel (`%pip` for Python, `install.packages` for R), no restart
 - `jupyter_set_kernel_purpose` — persist the user's explanation of what a kernel is for (across sessions)
 - `jupyter_save_notebook` — export a session as a valid `.ipynb`
 - **Remote auto-save** — after every cell, the notebook snapshot is uploaded to the remote server (remote `$HOME` by default), so the *same kernel* can be re-opened in a browser
@@ -58,7 +59,7 @@ purpose and auto-selects without re-asking.
 | `JUPYTER_KERNEL_NAME` | *none* | Optional fallback default kernel only — used when a tool call omits `kernel`; normally the agent picks per call |
 | `JUPYTER_REMOTE_TLS_INSECURE` | off | Skip TLS validation (dev only) |
 | `JUPYTER_REMOTE_TIMEOUT_MS` | `300000` | Per-cell timeout |
-| `JUPYTER_INSTALL_TIMEOUT_MS` | `600000` | `%pip` install timeout |
+| `JUPYTER_INSTALL_TIMEOUT_MS` | `600000` | Package-install timeout |
 | `JUPYTER_WORKING_DIR` | process cwd | Base dir for relative `save_notebook` paths |
 | `JUPYTER_TIMEOUT_RESTART_KERNEL` | off | Restart a kernel still busy after a timeout (state lost) |
 | `JUPYTER_BIND_SESSION` | on | Bind the kernel to an `/api/sessions` row so it shows in the Jupyter Running UI (`=0` restores bare-kernel behavior) |
@@ -87,7 +88,7 @@ never overwrite a newer one), and failures only produce a warning.
 - `jupyter_save_notebook` is unchanged: it still writes **locally** and is
   independent of the remote auto-save.
 
-## Multiple kernels (R and others) — chosen by the agent
+## Multiple kernels (R and others)
 
 The extension is language-aware: the chosen kernel's kernelspec drives the
 install command, the bootstrap code, and the metadata of saved notebooks.
@@ -117,9 +118,6 @@ you:   "statistics with R"
 agent: jupyter_set_kernel_purpose(kernel="ir", purpose="statistics with R")
 agent: jupyter_repl(kernel="ir", code="...")           # per-task choice
 ```
-
-Notes are stored in `~/.pi-jupyter/purposes.json` and only describe kernels —
-they never select one; the agent still decides per call.
 
 R example — tell the agent the R kernel exists (`kernel: "ir"`), or
 optionally pin it as the fallback default in `~/.pi-jupyter/config.json`
