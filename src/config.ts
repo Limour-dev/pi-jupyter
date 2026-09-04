@@ -23,6 +23,10 @@
  * timeout), and JUPYTER_KEEP_KERNELS=0 (legacy: kill named-notebook kernels
  * when a pi conversation ends; default keeps them running on the server so a
  * new conversation can re-attach to the same notebook and keep its variables).
+ * Tool gates (both OPT-IN, default OFF): JUPYTER_ENABLE_ADD_DEPENDENCIES=1 and
+ * JUPYTER_ENABLE_SAVE_NOTEBOOK=1 (or "enableAddDependencies" / "enableSaveNotebook"
+ * in the config file) load the jupyter_add_dependencies / jupyter_save_notebook
+ * tools respectively. When a gate is false the tool is not registered at all.
  */
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -58,6 +62,16 @@ export interface ShimConfig {
   remoteAutoSave: boolean;
   /** 远端 contents 相对 path，覆盖默认的 `${notebookId}.ipynb`（FR-3.4）。 */
   remoteSavePath?: string;
+  /**
+   * Load the jupyter_add_dependencies tool? OPT-IN: default false — when false
+   * the tool is not registered at all (see ARCHITECTURE.md).
+   */
+  enableAddDependencies: boolean;
+  /**
+   * Load the jupyter_save_notebook tool? OPT-IN: default false — when false
+   * the tool is not registered at all (see ARCHITECTURE.md).
+   */
+  enableSaveNotebook: boolean;
 }
 
 export const CONFIG_HINT =
@@ -71,14 +85,7 @@ export const CONFIG_HINT =
  * @param env  Injected for testing (defaults to `process.env`).
  */
 export function loadConfig(env: Record<string, string | undefined> = process.env): ShimConfig {
-  let file: Record<string, unknown> = {};
-  try {
-    file = JSON.parse(
-      readFileSync(join(homedir(), ".pi-jupyter", "config.json"), "utf-8"),
-    ) as Record<string, unknown>;
-  } catch {
-    /* no config file — env vars only */
-  }
+  const file = readConfigFile();
 
   const url = env.JUPYTER_REMOTE_URL ?? (file.url as string | undefined);
   const token = env.JUPYTER_REMOTE_TOKEN ?? (file.token as string | undefined);
@@ -128,6 +135,24 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     remoteSavePath: nonEmpty(
       env.JUPYTER_REMOTE_SAVE_PATH ?? (file.remoteSavePath as string | undefined),
     ),
+    // Tool gates are OPT-IN (default false): the extension registers
+    // jupyter_add_dependencies / jupyter_save_notebook only when enabled.
+    enableAddDependencies: gateFrom(env, file, "JUPYTER_ENABLE_ADD_DEPENDENCIES", "enableAddDependencies"),
+    enableSaveNotebook: gateFrom(env, file, "JUPYTER_ENABLE_SAVE_NOTEBOOK", "enableSaveNotebook"),
+  };
+}
+
+/**
+ * Which OPT-IN tools the extension registers (jupyter_add_dependencies /
+ * jupyter_save_notebook). Resolved env > config file > default (false) WITHOUT
+ * requiring url/token, so the unconfigured stub path can apply the same gates —
+ * the tool list stays stable before and after configuration (UX-8).
+ */
+export function loadToolGates(env: Record<string, string | undefined> = process.env): ToolGates {
+  const file = readConfigFile();
+  return {
+    enableAddDependencies: gateFrom(env, file, "JUPYTER_ENABLE_ADD_DEPENDENCIES", "enableAddDependencies"),
+    enableSaveNotebook: gateFrom(env, file, "JUPYTER_ENABLE_SAVE_NOTEBOOK", "enableSaveNotebook"),
   };
 }
 
@@ -139,6 +164,41 @@ export function isConfigured(env: Record<string, string | undefined> = process.e
   } catch {
     return false;
   }
+}
+
+/**
+ * Read ~/.pi-jupyter/config.json once; an env-only setup gets {}.
+ */
+function readConfigFile(): Record<string, unknown> {
+  try {
+    return JSON.parse(
+      readFileSync(join(homedir(), ".pi-jupyter", "config.json"), "utf-8"),
+    ) as Record<string, unknown>;
+  } catch {
+    return {}; /* no config file — env vars only */
+  }
+}
+
+/** The two OPT-IN tool gates — see ShimConfig. */
+export interface ToolGates {
+  enableAddDependencies: boolean;
+  enableSaveNotebook: boolean;
+}
+
+/**
+ * env "1"/"0" wins over the config file; with no env the file key decides,
+ * `=== true` so a missing or non-boolean key means false (the default).
+ */
+function gateFrom(
+  env: Record<string, string | undefined>,
+  file: Record<string, unknown>,
+  envKey: string,
+  fileKey: string,
+): boolean {
+  const v = env[envKey];
+  if (v === "1") return true;
+  if (v === "0") return false;
+  return file[fileKey] === true;
 }
 
 function intEnv(env: Record<string, string | undefined>, k: string): number | undefined {

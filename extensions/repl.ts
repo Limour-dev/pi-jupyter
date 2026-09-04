@@ -62,6 +62,11 @@
  *   JUPYTER_REMOTE_SAVE_PATH   legacy override only for sessions created
  *                              WITHOUT an explicit path (every session today
  *                              opens a named notebook, so it is rarely used)
+ *   JUPYTER_ENABLE_ADD_DEPENDENCIES=1  load the jupyter_add_dependencies tool
+ *   JUPYTER_ENABLE_SAVE_NOTEBOOK=1     load the jupyter_save_notebook tool
+ *                              (or config.json "enableAddDependencies" /
+ *                              "enableSaveNotebook": true). Both default OFF —
+ *                              when false the tool is not registered at all.
  * After editing, run `/reload` in pi.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -70,7 +75,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
-import { CONFIG_HINT, isConfigured, loadConfig } from "../src/config";
+import { CONFIG_HINT, isConfigured, loadConfig, loadToolGates } from "../src/config";
 import type { ResumeOutcome, Session } from "../src/domain/types";
 import { JupyterServer } from "../src/kernel/server";
 import { loadNotebooks, touchNotebook } from "../src/notebooks";
@@ -158,6 +163,9 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     });
     // Register every tool even when unconfigured, so the tool list is stable
     // before/after configuration; each stub fails with the same hint (UX-8).
+    // jupyter_add_dependencies / jupyter_save_notebook are OPT-IN (config tool
+    // gates, default OFF) — when disabled they are not registered here either.
+    const gates = loadToolGates();
     pi.registerTool({
       name: "jupyter_list_kernels",
       label: "List Kernels",
@@ -224,26 +232,30 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
         throw new Error(CONFIG_HINT);
       },
     });
-    pi.registerTool({
-      name: "jupyter_add_dependencies",
-      label: "Add Dependencies",
-      description:
-        "Install packages into the remote kernel's environment. Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
-      parameters: ADD_DEPENDENCIES_PARAMS,
-      async execute() {
-        throw new Error(CONFIG_HINT);
-      },
-    });
-    pi.registerTool({
-      name: "jupyter_save_notebook",
-      label: "Save Notebook",
-      description:
-        "Save the current session as an .ipynb file. Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
-      parameters: SAVE_NOTEBOOK_PARAMS,
-      async execute() {
-        throw new Error(CONFIG_HINT);
-      },
-    });
+    if (gates.enableAddDependencies) {
+      pi.registerTool({
+        name: "jupyter_add_dependencies",
+        label: "Add Dependencies",
+        description:
+          "Install packages into the remote kernel's environment. Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
+        parameters: ADD_DEPENDENCIES_PARAMS,
+        async execute() {
+          throw new Error(CONFIG_HINT);
+        },
+      });
+    }
+    if (gates.enableSaveNotebook) {
+      pi.registerTool({
+        name: "jupyter_save_notebook",
+        label: "Save Notebook",
+        description:
+          "Save the current session as an .ipynb file. Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
+        parameters: SAVE_NOTEBOOK_PARAMS,
+        async execute() {
+          throw new Error(CONFIG_HINT);
+        },
+      });
+    }
     return;
   }
 
@@ -523,7 +535,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     const liveShown = liveRows.filter((r) => isDirectChild(r.path, dir));
     const lines: string[] = [
       `Notebooks available to continue on the configured Jupyter Server (directly in "${dir}"):`,
-      "  Continue one with jupyter_open_notebook(path=…); then keep passing the same path as `notebook` to jupyter_repl / jupyter_add_dependencies / jupyter_save_notebook.",
+      `  Continue one with jupyter_open_notebook(path=…); then keep passing the same path as \`notebook\` to jupyter_repl${config.enableAddDependencies ? " / jupyter_add_dependencies" : ""}${config.enableSaveNotebook ? " / jupyter_save_notebook" : ""}.`,
       "",
     ];
     if (rows.length === 0) {
@@ -796,8 +808,8 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       "jupyter_repl: run code on a remote Jupyter notebook kernel — pass the notebook path opened with jupyter_open_notebook.",
     promptGuidelines: [
       "Begin Jupyter work with jupyter_list_notebooks(dir=…) to see which sessions are active in the current remote contents folder (open here / LIVE on the server) — scope the listing to one directory (direct children only, no recursion); with none active — or to switch — continue a notebook with jupyter_open_notebook first (call jupyter_list_kernels first when you do not know the kernels), then run code with jupyter_repl.",
-      "Pass the same `notebook` path to jupyter_repl / jupyter_add_dependencies / jupyter_save_notebook to REUSE the session. Opening a previously-closed notebook starts a new kernel bound to its file and re-runs the code cells from first to last (state restored); opening a LIVE one attaches with variables kept.",
-      "jupyter_repl has no `kernel` or `dependencies` parameter — the kernel was fixed when the notebook was opened (live kernel / recorded kernelspec / the `kernel` param of jupyter_open_notebook / config fallback). Install packages with jupyter_add_dependencies.",
+      `Pass the same \`notebook\` path to jupyter_repl${config.enableAddDependencies ? " / jupyter_add_dependencies" : ""}${config.enableSaveNotebook ? " / jupyter_save_notebook" : ""} to REUSE the session. Opening a previously-closed notebook starts a new kernel bound to its file and re-runs the code cells from first to last (state restored); opening a LIVE one attaches with variables kept.`,
+      `jupyter_repl has no \`kernel\` or \`dependencies\` parameter — the kernel was fixed when the notebook was opened (live kernel / recorded kernelspec / the \`kernel\` param of jupyter_open_notebook / config fallback).${config.enableAddDependencies ? " Install packages with jupyter_add_dependencies." : ""}`,
       "The last expression is the result; use print()/display() for intermediate output. Images (matplotlib, PIL) come back inline.",
     ],
     parameters: JUPYTER_PARAMS,
@@ -949,69 +961,73 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
 
   // ── jupyter_add_dependencies ─────────────────────────────────────────────
 
-  pi.registerTool<typeof ADD_DEPENDENCIES_PARAMS, { kernel?: string; notebook_id?: string; packages?: string[] }>({
-    name: "jupyter_add_dependencies",
-    label: "Add Dependencies",
-    description:
-      "Install packages into a notebook's kernel WITHOUT restarting. Python kernels use %pip (specs like 'matplotlib', 'numpy>=2'); R kernels use CRAN install.packages (e.g. 'ggplot2'); other languages fail explicitly. Real install errors are reported, never masked.",
-    parameters: ADD_DEPENDENCIES_PARAMS,
-    async execute(_toolCallId, params: AddDependenciesParams, signal) {
-      if (signal?.aborted) throw new Error("aborted");
-      if (!params.packages.length) {
-        return { content: [{ type: "text", text: "No packages given." }], details: {} };
-      }
-      const { session: sess } = await ensureNotebookSession({ path: params.notebook });
-      try {
-        await addDepsAndSync(sess, params.packages);
-      } catch (err) {
-        // Surface the REAL failure (wrong language, network, CRAN error, …)
-        // instead of pretending the install succeeded (BUG-1).
+  if (config.enableAddDependencies) {
+    pi.registerTool<typeof ADD_DEPENDENCIES_PARAMS, { kernel?: string; notebook_id?: string; packages?: string[] }>({
+      name: "jupyter_add_dependencies",
+      label: "Add Dependencies",
+      description:
+        "Install packages into a notebook's kernel WITHOUT restarting. Python kernels use %pip (specs like 'matplotlib', 'numpy>=2'); R kernels use CRAN install.packages (e.g. 'ggplot2'); other languages fail explicitly. Real install errors are reported, never masked.",
+      parameters: ADD_DEPENDENCIES_PARAMS,
+      async execute(_toolCallId, params: AddDependenciesParams, signal) {
+        if (signal?.aborted) throw new Error("aborted");
+        if (!params.packages.length) {
+          return { content: [{ type: "text", text: "No packages given." }], details: {} };
+        }
+        const { session: sess } = await ensureNotebookSession({ path: params.notebook });
+        try {
+          await addDepsAndSync(sess, params.packages);
+        } catch (err) {
+          // Surface the REAL failure (wrong language, network, CRAN error, …)
+          // instead of pretending the install succeeded (BUG-1).
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Failed to install into ${sess.contentsPath} (kernel ${sess.kernelName}): ${(err as Error).message}`,
+              },
+            ],
+            details: { kernel: sess.kernelName, notebook: sess.contentsPath, notebook_id: sess.notebookId, packages: params.packages },
+          };
+        }
         return {
           content: [
             {
               type: "text",
-              text: `Failed to install into ${sess.contentsPath} (kernel ${sess.kernelName}): ${(err as Error).message}`,
+              text: `Installed into ${sess.contentsPath} (kernel ${sess.kernelName}): ${params.packages.join(", ")}`,
             },
           ],
           details: { kernel: sess.kernelName, notebook: sess.contentsPath, notebook_id: sess.notebookId, packages: params.packages },
         };
-      }
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Installed into ${sess.contentsPath} (kernel ${sess.kernelName}): ${params.packages.join(", ")}`,
-          },
-        ],
-        details: { kernel: sess.kernelName, notebook: sess.contentsPath, notebook_id: sess.notebookId, packages: params.packages },
-      };
-    },
-  });
+      },
+    });
+  }
 
   // ── jupyter_save_notebook ────────────────────────────────────────────────
 
-  pi.registerTool<typeof SAVE_NOTEBOOK_PARAMS, { kernel?: string; notebook_id: string; path?: string }>({
-    name: "jupyter_save_notebook",
-    label: "Save Notebook",
-    description:
-      "Save a notebook session as a local .ipynb file (openable in Jupyter / VSCode). `path` defaults to <notebook-id>.ipynb in the working directory; relative paths resolve against the working directory, so prefer absolute paths or ~/.",
-    parameters: SAVE_NOTEBOOK_PARAMS,
-    async execute(_toolCallId, params: SaveNotebookParams, signal, _onUpdate, ctx) {
-      if (signal?.aborted) throw new Error("aborted");
-      const { session: sess } = await ensureNotebookSession({ path: params.notebook });
-      // Resolve relative paths against the pi working directory (ctx.cwd), NOT
-      // the pi *process* cwd — under npx those are different places (BUG-3).
-      const base = ctx?.cwd ?? process.cwd();
-      const savePath = params.path
-        ? resolvePath(params.path, base)
-        : join(base, `${sess.notebookId}.ipynb`);
-      const where = await sess.saveNotebook(savePath);
-      return {
-        content: [{ type: "text", text: `Notebook (kernel ${sess.kernelName}) saved to ${where}` }],
-        details: { kernel: sess.kernelName, notebook: sess.contentsPath, notebook_id: sess.notebookId, path: where },
-      };
-    },
-  });
+  if (config.enableSaveNotebook) {
+    pi.registerTool<typeof SAVE_NOTEBOOK_PARAMS, { kernel?: string; notebook_id: string; path?: string }>({
+      name: "jupyter_save_notebook",
+      label: "Save Notebook",
+      description:
+        "Save a notebook session as a local .ipynb file (openable in Jupyter / VSCode). `path` defaults to <notebook-id>.ipynb in the working directory; relative paths resolve against the working directory, so prefer absolute paths or ~/.",
+      parameters: SAVE_NOTEBOOK_PARAMS,
+      async execute(_toolCallId, params: SaveNotebookParams, signal, _onUpdate, ctx) {
+        if (signal?.aborted) throw new Error("aborted");
+        const { session: sess } = await ensureNotebookSession({ path: params.notebook });
+        // Resolve relative paths against the pi working directory (ctx.cwd), NOT
+        // the pi *process* cwd — under npx those are different places (BUG-3).
+        const base = ctx?.cwd ?? process.cwd();
+        const savePath = params.path
+          ? resolvePath(params.path, base)
+          : join(base, `${sess.notebookId}.ipynb`);
+        const where = await sess.saveNotebook(savePath);
+        return {
+          content: [{ type: "text", text: `Notebook (kernel ${sess.kernelName}) saved to ${where}` }],
+          details: { kernel: sess.kernelName, notebook: sess.contentsPath, notebook_id: sess.notebookId, path: where },
+        };
+      },
+    });
+  }
 
   // ── /jupyter-reset ───────────────────────────────────────────────────────
 

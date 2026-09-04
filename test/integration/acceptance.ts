@@ -21,6 +21,8 @@ const BASE: ShimConfig = {
   timeoutRestartKernel: false,
   keepKernels: true,
   remoteAutoSave: false,
+  enableAddDependencies: true,
+  enableSaveNotebook: true,
 };
 
 const ok = (m: string) => console.log(`   ✓ ${m}`);

@@ -3,7 +3,10 @@
  * Env vars are injected so no real environment is touched.
  */
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { isConfigured, loadConfig } from "../../src/config";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { isConfigured, loadConfig, loadToolGates } from "../../src/config";
 
 // Keep these tests hermetic: point HOME at an empty directory so the real
 // ~/.pi-jupyter/config.json (if any) cannot leak into loadConfig().
@@ -15,6 +18,8 @@ afterEach(() => {
   delete process.env.JUPYTER_REMOTE_TOKEN;
   delete process.env.JUPYTER_REMOTE_AUTOSAVE;
   delete process.env.JUPYTER_REMOTE_SAVE_PATH;
+  delete process.env.JUPYTER_ENABLE_ADD_DEPENDENCIES;
+  delete process.env.JUPYTER_ENABLE_SAVE_NOTEBOOK;
 });
 
 const BASE = {
@@ -100,5 +105,64 @@ describe("keepKernels (notebook continuity policy)", () => {
   });
   it("JUPYTER_KEEP_KERNELS=1 enables", () => {
     expect(loadConfig({ ...BASE, JUPYTER_KEEP_KERNELS: "1" }).keepKernels).toBe(true);
+  });
+});
+
+describe("tool gates (enableAddDependencies / enableSaveNotebook)", () => {
+  it("default to false — the tools are not loaded", () => {
+    const cfg = loadConfig(BASE);
+    expect(cfg.enableAddDependencies).toBe(false);
+    expect(cfg.enableSaveNotebook).toBe(false);
+    expect(loadToolGates(BASE)).toEqual({
+      enableAddDependencies: false,
+      enableSaveNotebook: false,
+    });
+  });
+
+  it("each gate toggles independently via env 1/0", () => {
+    expect(loadConfig({ ...BASE, JUPYTER_ENABLE_ADD_DEPENDENCIES: "1" }).enableAddDependencies).toBe(true);
+    expect(loadConfig({ ...BASE, JUPYTER_ENABLE_ADD_DEPENDENCIES: "1" }).enableSaveNotebook).toBe(false);
+    expect(loadConfig({ ...BASE, JUPYTER_ENABLE_SAVE_NOTEBOOK: "1" }).enableSaveNotebook).toBe(true);
+    expect(loadConfig({ ...BASE, JUPYTER_ENABLE_ADD_DEPENDENCIES: "1", JUPYTER_ENABLE_SAVE_NOTEBOOK: "1" }).enableSaveNotebook).toBe(true);
+    expect(loadConfig({ ...BASE, JUPYTER_ENABLE_SAVE_NOTEBOOK: "0" }).enableSaveNotebook).toBe(false);
+  });
+
+  it("config.json enables the tools (no env override)", () => {
+    const cfgDir = join(homedir(), ".pi-jupyter");
+    const cfgPath = join(cfgDir, "config.json");
+    mkdirSync(cfgDir, { recursive: true });
+    writeFileSync(
+      cfgPath,
+      JSON.stringify({ url: "http://example:8888", token: "tok", enableAddDependencies: true, enableSaveNotebook: true }),
+    );
+    try {
+      expect(loadConfig().enableAddDependencies).toBe(true);
+      expect(loadConfig().enableSaveNotebook).toBe(true);
+    } finally {
+      rmSync(cfgPath);
+    }
+  });
+
+  it("env wins over config.json", () => {
+    const cfgDir = join(homedir(), ".pi-jupyter");
+    const cfgPath = join(cfgDir, "config.json");
+    mkdirSync(cfgDir, { recursive: true });
+    writeFileSync(
+      cfgPath,
+      JSON.stringify({ enableSaveNotebook: true }),
+    );
+    try {
+      expect(loadConfig({ JUPYTER_REMOTE_URL: "http://example:8888", JUPYTER_REMOTE_TOKEN: "tok", JUPYTER_ENABLE_SAVE_NOTEBOOK: "0" }).enableSaveNotebook).toBe(false);
+    } finally {
+      rmSync(cfgPath);
+    }
+  });
+
+  it("loadToolGates needs no url/token (stable tool list unconfigured)", () => {
+    expect(loadToolGates({})).toEqual({ enableAddDependencies: false, enableSaveNotebook: false });
+    expect(loadToolGates({ JUPYTER_ENABLE_ADD_DEPENDENCIES: "1" })).toEqual({
+      enableAddDependencies: true,
+      enableSaveNotebook: false,
+    });
   });
 });

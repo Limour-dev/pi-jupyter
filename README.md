@@ -21,11 +21,12 @@ sessions are gone (`jupyter_repl` requires `notebook` and no longer takes `kerne
 - `jupyter_repl` — execute code in the active notebook session (`notebook` is required and
   the call REUSES that session); variables/imports persist between calls
 - `jupyter_add_dependencies` — hot-install packages into a notebook's kernel (`%pip` for
-  Python, `install.packages` for R), no restart
+  Python, `install.packages` for R), no restart — **OPT-IN tool** (off by default, see *Tool gates* below)
 - `jupyter_list_kernels` — discover the kernels (python3, ir, …) on the server; shows each
   kernel's recorded purpose and flags new ones with none
 - `jupyter_set_kernel_purpose` — persist the user's explanation of what a kernel is for
-- `jupyter_save_notebook` — export a notebook session as a valid `.ipynb`
+- `jupyter_save_notebook` — export a notebook session as a valid `.ipynb` — **OPT-IN tool**
+  (off by default, see *Tool gates* below)
 - `jupyter_shutdown_notebook` — kill one notebook's kernel (the .ipynb file stays)
 - **Remote auto-save** — after every cell, the notebook snapshot is uploaded to the remote
   server (remote `$HOME` by default), so the *same kernel* can be re-opened in a browser
@@ -53,6 +54,16 @@ export JUPYTER_REMOTE_TOKEN=123456
 
 Optional config file: `~/.pi-jupyter/config.json`
 (see [`config.example.json`](./config.example.json)). Env vars win over the file.
+
+### Tool gates (both default OFF)
+
+`jupyter_add_dependencies` and `jupyter_save_notebook` are **not registered by default** —
+each is loaded only when its gate is on, in `~/.pi-jupyter/config.json`: `"enableAddDependencies": true`
+loads `jupyter_add_dependencies`; `"enableSaveNotebook": true` loads `jupyter_save_notebook`.
+Equivalently via env `JUPYTER_ENABLE_ADD_DEPENDENCIES=1` / `JUPYTER_ENABLE_SAVE_NOTEBOOK=1`
+(env wins). When a gate is off the tool does not exist for the agent at all: it is never
+prompted to install packages or write `.ipynb` files, and the `jupyter_repl` /
+`jupyter_list_notebooks` help text stops naming it.
 
 ## How an agent should drive it (the notebook flow)
 
@@ -114,6 +125,8 @@ later `jupyter_list_kernels` shows the purpose.
 | `JUPYTER_KEEP_KERNELS` | on | Notebook kernels keep running on the server when a pi conversation ends, so a later conversation/browser can re-attach to the same notebook (variables kept). `=0` restores kill-on-exit |
 | `JUPYTER_REMOTE_AUTOSAVE` | on | Upload the notebook snapshot to the remote server after every cell (`=0` disables) |
 | `JUPYTER_REMOTE_SAVE_PATH` | — | Legacy override only for sessions created WITHOUT an explicit path — every session today opens a named notebook, so it is rarely used |
+| `JUPYTER_ENABLE_ADD_DEPENDENCIES` | off | Load the `jupyter_add_dependencies` tool (opt-in, see *Tool gates*) |
+| `JUPYTER_ENABLE_SAVE_NOTEBOOK` | off | Load the `jupyter_save_notebook` tool (opt-in, see *Tool gates*) |
 
 ## Continuity across conversations
 

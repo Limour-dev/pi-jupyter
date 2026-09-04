@@ -25,6 +25,8 @@ const CONFIG: ShimConfig = {
   timeoutRestartKernel: false,
   keepKernels: true,
   remoteAutoSave: true,
+  enableAddDependencies: true,
+  enableSaveNotebook: true,
 };
 
 /** CONFIG with an R kernelspec selected. */

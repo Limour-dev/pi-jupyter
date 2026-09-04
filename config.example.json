@@ -4,6 +4,7 @@
   "$comment.purposes": "What each kernel is for lives SEPARATELY in ~/.pi-jupyter/purposes.json (a JSON map like {\"python3\": \"data analysis\"}). The agent records it with jupyter_set_kernel_purpose after you explain a new kernel; you may also edit that file by hand. It only describes kernels, never selects one.",
   "$comment.notebooks": "Which notebooks pi has opened is remembered in ~/.pi-jupyter/notebooks.json (contents path -> kernel/last-used). jupyter_list_notebooks(dir=…) merges it with the server's live sessions — scoped to one remote contents directory, only direct children of dir (never recursing into subdirectories; pass "." for the server root) — so a NEW conversation can continue a notebook: attaching to its still-running kernel when there is one, otherwise starting a new kernel bound to the same path and re-running the file's cells from first to last so the state is restored.",
   "$comment.extras": "Optional fields: \"workingDir\": \"/path/to/project\" (base for relative save paths), \"timeoutRestartKernel\": true (auto-restart a kernel still busy after a timeout; state is lost), \"bindSession\": true (bind the kernel to an /api/sessions row so it shows up in the Jupyter Running UI; defaults to true), and \"keepKernels\": false (kill named-notebook kernels when the pi conversation ends instead of leaving them running for re-attach; defaults to true).",
+  "$comment.toolGates": "OPT-IN tools, BOTH DEFAULT FALSE — a tool is only registered (loaded) when its gate is true. \"enableAddDependencies\": true loads jupyter_add_dependencies (install packages); \"enableSaveNotebook\": true loads jupyter_save_notebook (save a local .ipynb). When false (default) the tool does not exist for the agent at all, so nothing prompts it to install packages or write files. Env overrides: JUPYTER_ENABLE_ADD_DEPENDENCIES=1 / JUPYTER_ENABLE_SAVE_NOTEBOOK=1.",
   "$comment.remoteAutoSave": "After each jupyter_repl cell, automatically upload the notebook snapshot to the remote server (Contents API). Defaults to true; set false to disable. The file lands at the contents root == the remote $HOME in a default deployment, under <notebookId>.ipynb (or under a path you opened with jupyter_open_notebook), so opening it in a browser reuses the SAME kernel.",
   "$comment.remoteSavePath": "Legacy override of the remote contents path, used ONLY for sessions created without an explicit path — every session today opens a named notebook (jupyter_open_notebook / the required `notebook` param), so this is rarely used. Empty string == default <notebookId>.ipynb. \"..\" segments are rejected.",
   "url": "http://192.168.105.1:57002",
@@ -15,5 +16,7 @@
   "bindSession": true,
   "keepKernels": true,
   "remoteAutoSave": true,
-  "remoteSavePath": ""
+  "remoteSavePath": "",
+  "enableAddDependencies": false,
+  "enableSaveNotebook": false
 }

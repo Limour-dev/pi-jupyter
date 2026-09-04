@@ -47,7 +47,7 @@ export { JupyterServer } from "./kernel/server";
 export { fromIOPub } from "./kernel/convert";
 
 // ── config + session + purpose notes ───────────────────────────────────────
-export { isConfigured, loadConfig, type ShimConfig } from "./config";
+export { isConfigured, loadConfig, loadToolGates, type ShimConfig, type ToolGates } from "./config";
 export { loadPurposes, savePurposes, purposesFilePath, type KernelPurposes } from "./purposes";
 export {
   forgetNotebook,
