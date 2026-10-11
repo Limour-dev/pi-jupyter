@@ -11,6 +11,9 @@
 
 // ── domain (pure) ───────────────────────────────────────────────────────────
 export {
+  type CellEditAction,
+  type CellEditOpts,
+  type CellEditOutcome,
   type CellResult,
   type CellStatus,
   type ContentsEntry,

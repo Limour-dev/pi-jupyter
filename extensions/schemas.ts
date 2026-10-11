@@ -51,6 +51,12 @@ export const JUPYTER_PARAMS = Type.Object({
       default: false,
     }),
   ),
+  after_cell_id: Type.Optional(
+    Type.String({
+      description:
+        "Record this run directly AFTER the code cell with this id instead of at the end of the document. Only meaningful with persist=true and when the code matches no existing cell (an in-place re-run keeps its own position). Unknown ids are rejected before anything runs. Use it to place a promoted scratch/probe cell where it belongs (issue 1-4).",
+    }),
+  ),
 });
 
 export const ADD_DEPENDENCIES_PARAMS = Type.Object({
@@ -84,6 +90,52 @@ export const OPEN_NOTEBOOK_PARAMS = Type.Object({
     }),
   ),
   kernel: KERNEL,
+  replay: Type.Optional(
+    Type.Union([Type.Literal("auto"), Type.Literal("skip")], {
+      description:
+        'Whether to re-run the file\'s code cells when a fresh kernel is started: "auto" (default) replays them from first to last to rebuild the in-memory state; "skip" only LOADS the document (cell list + saved outputs) and executes nothing — use it when you just need to read the current file without paying for a full replay. A skipped replay leaves the new kernel with NO state, so later cells that depend on earlier ones must be re-run with jupyter_repl(notebook=…, persist=true). Only a "started" open (no live kernel) replays at all; an attach never replays.',
+      default: "auto",
+    }),
+  ),
+});
+
+/**
+ * Structural edits of an OPEN notebook's cells (issue 1-2): delete / replace /
+ * move / insert one code cell. This is what makes the `.ipynb` itself editable
+ * from inside the session, so the agent never has to touch the file from the
+ * outside (the workaround whose in-flight snapshot could be rolled back).
+ */
+export const EDIT_CELL_PARAMS = Type.Object({
+  notebook: NOTEBOOK,
+  action: Type.Union(
+    [Type.Literal("delete"), Type.Literal("replace"), Type.Literal("move"), Type.Literal("insert")],
+    {
+      description:
+        'Edit to apply: "delete" removes a cell; "replace" swaps an existing cell\'s source (its stale outputs are cleared — re-run it with jupyter_repl(persist=true) to fill them again); "move" reorders a cell to `position`; "insert" adds a NEW un-executed cell.',
+    },
+  ),
+  cell_id: Type.Optional(
+    Type.String({
+      description:
+        'Target cell id (from jupyter_open_notebook details.cells or jupyter_outputs). Required for delete/replace/move; omit it for insert (or pass after_cell_id to anchor the new cell).',
+    }),
+  ),
+  source: Type.Optional(
+    Type.String({
+      description: 'New cell source — required for "replace" and "insert".',
+    }),
+  ),
+  position: Type.Optional(
+    Type.Number({
+      description:
+        '0-based index among CODE cells: the destination for "move", or the insertion point for "insert" (ignored when after_cell_id is given). Omit to append.',
+    }),
+  ),
+  after_cell_id: Type.Optional(
+    Type.String({
+      description: 'For "insert": place the new cell directly after this cell id (wins over `position`).',
+    }),
+  ),
 });
 
 export const LIST_NOTEBOOKS_PARAMS = Type.Object({
@@ -163,3 +215,4 @@ export type OpenNotebookParams = Static<typeof OPEN_NOTEBOOK_PARAMS>;
 export type OutputsParams = Static<typeof OUTPUTS_PARAMS>;
 export type ShutdownNotebookParams = Static<typeof SHUTDOWN_NOTEBOOK_PARAMS>;
 export type SetKernelPurposeParams = Static<typeof SET_KERNEL_PURPOSE_PARAMS>;
+export type EditCellParams = Static<typeof EDIT_CELL_PARAMS>;

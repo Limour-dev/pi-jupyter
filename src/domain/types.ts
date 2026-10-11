@@ -66,6 +66,15 @@ export type RunCellOpts = {
    * explicit `persist` choice, whose default is false (scratch).
    */
   persist?: boolean;
+  /**
+   * When this run RECORDS A NEW CELL, insert it directly after the code cell
+   * with this id instead of appending at the end of the document (issue 1-4:
+   * "promote" a scratch probe into position, or place a fresh cell where it
+   * belongs). Ignored when the source matches an existing cell (that cell is
+   * re-run in place) and when `persist` is off. An unknown id is rejected
+   * BEFORE anything runs.
+   */
+  afterCellId?: string;
 };
 
 // ── Remote contents ─────────────────────────────────────────────────────────
@@ -181,6 +190,13 @@ export interface Session {
   /** Ordered code cells of the live document (file-restored + run this session). */
   listCells(): DocumentCell[];
   /**
+   * Edit the live document (issue 1-2): delete / replace / move / insert a code
+   * cell, then persist the result through the remote auto-save. This is the
+   * in-plugin write path that makes editing an `.ipynb` during a session
+   * possible without touching the file from the outside.
+   */
+  editCell(opts: CellEditOpts): Promise<CellEditOutcome>;
+  /**
    * How this session attached to its contents path (set by resume(); undefined
    * for sessions created directly with initialize()): "attached" reused a live
    * kernel, "started" began a new one.
@@ -203,6 +219,40 @@ export type DocumentCell = {
   executionCount?: number;
   /** True while the cell came from the file and has not run on this kernel yet. */
   restored: boolean;
+  /**
+   * True when the cell was restored from the file AND that file recorded an
+   * error output for it. Lets the open/replay summary tell a PRE-EXISTING
+   * failing cell (the file's old debt) apart from a failure this replay
+   * produced (issue 1-3).
+   */
+  fileError?: boolean;
+};
+
+// ── Cell editing (issue 1-2) ────────────────────────────────────────────────
+
+/** The structural edits `jupyter_edit_cell` can apply to an open document. */
+export type CellEditAction = "delete" | "replace" | "move" | "insert";
+
+export type CellEditOpts = {
+  action: CellEditAction;
+  /** Target cell id for `delete` / `replace` / `move`. */
+  cellId?: string;
+  /** New source for `replace` / `insert`. */
+  source?: string;
+  /** 0-based index among CODE cells — the target for `move`, an optional insert point for `insert`. */
+  position?: number;
+  /** For `insert`: place the new cell directly after this cell id (wins over `position`). */
+  afterCellId?: string;
+};
+
+export type CellEditOutcome = {
+  action: CellEditAction;
+  /** Id of the affected cell (kept for replace/move; fresh for insert). */
+  cellId?: string;
+  /** 0-based index of the affected cell among code cells AFTER the edit. */
+  index?: number;
+  /** The document's code cells after the edit, in order. */
+  cells: DocumentCell[];
 };
 
 /** How {@link RemoteSession.resume} attached to a notebook path. */

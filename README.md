@@ -15,16 +15,17 @@ sessions are gone (`jupyter_repl` requires `notebook` and no longer takes `kerne
 - `jupyter_open_notebook` — start an ACTIVE session on a notebook: attaches to its
   still-running kernel when one is bound to the path (no new kernel, variables kept), or
   starts a NEW kernel bound to the same path and **re-runs the file's code cells from
-  first to last** so the in-memory state is restored (previously-closed session)
+  first to last** so the in-memory state is restored (previously-closed session); pass `replay=skip` to load the document WITHOUT executing anything
 - `jupyter_repl` — execute code in the active notebook session (`notebook` required; the call REUSES that session); variables/imports persist between calls. **SCRATCH by default**: the run's output comes back but the notebook document is NOT changed, so probes/experiments never pollute the file; pass `persist=true` to record real work (an existing same-source cell re-runs in place, otherwise a new cell is appended)
+- `jupyter_edit_cell` — edit an OPEN notebook's document in place: `delete` / `replace` / `move` / `insert` a code cell. The in-plugin write path for restructuring a notebook (drop probe/error cells, swap a cell's source, reorder cells); every edit is written to the remote `.ipynb`
 - `jupyter_outputs` — read the outputs a notebook FILE already records, **read-only** (no kernel, nothing executed); re-read a saved table/p-value without parsing the `.ipynb` by hand
 - `jupyter_add_dependencies` — hot-install packages into a notebook's kernel (`%pip` for
   Python, `install.packages` for R), no restart — **OPT-IN tool** (off by default, see *Tool gates* below)
 - `jupyter_list_kernels` — discover the kernels (python3, ir, …) on the server; shows each
   kernel's recorded purpose and flags new ones with none
 - `jupyter_set_kernel_purpose` — persist the user's explanation of what a kernel is for
-- `jupyter_save_notebook` — export a notebook session as a valid `.ipynb` — **OPT-IN tool**
-  (off by default, see *Tool gates* below)
+- `jupyter_save_notebook` — export a notebook session as a valid **local** `.ipynb` (escape
+  hatch when the remote copy may be stale) — on by default (`JUPYTER_ENABLE_SAVE_NOTEBOOK=0` hides it)
 - `jupyter_shutdown_notebook` — kill one notebook's kernel (the .ipynb file stays)
 - **Remote auto-save** — after every cell, the notebook snapshot is uploaded to the remote
   server (remote `$HOME` by default), so the *same kernel* can be re-opened in a browser
@@ -53,16 +54,16 @@ export JUPYTER_REMOTE_TOKEN=123456
 Optional config file: `~/.pi-jupyter/config.json`
 (see [`config.example.json`](./config.example.json)). Env vars win over the file.
 
-### Tool gates (both default OFF)
+### Tool gates (add-dependencies opt-in, save-notebook on by default)
 
-`jupyter_add_dependencies` and `jupyter_save_notebook` are **not registered by default** —
-each is loaded only when its gate is on, in `~/.pi-jupyter/config.json`: `"enableAddDependencies": true`
-loads `jupyter_add_dependencies`; `"enableSaveNotebook": true` loads `jupyter_save_notebook`.
-Equivalently via env `JUPYTER_ENABLE_ADD_DEPENDENCIES=1` / `JUPYTER_ENABLE_SAVE_NOTEBOOK=1`
-(env wins). When a gate is off the tool does not exist for the agent at all: it is never
-prompted to install packages or write `.ipynb` files, and the `jupyter_repl` /
-`jupyter_list_notebooks` help text stops naming it.
-
+`jupyter_add_dependencies` is **not registered by default** — it is loaded only with
+`"enableAddDependencies": true` in `~/.pi-jupyter/config.json` (or
+`JUPYTER_ENABLE_ADD_DEPENDENCIES=1`). Installing packages is a real side effect, so it
+stays opt-in. `jupyter_save_notebook` **is registered by default** (issue 1-5) — it dumps
+the live document to a LOCAL `.ipynb`, the escape hatch when the remote copy may be
+behind; hide it with `"enableSaveNotebook": false` or `JUPYTER_ENABLE_SAVE_NOTEBOOK=0`.
+Env vars win over the file. When a gate is off the tool does not exist for the agent at
+all, and the `jupyter_repl` / `jupyter_list_notebooks` help text stops naming it.
 ## How an agent should drive it (the notebook flow)
 
 There are **no anonymous kernel sessions**: code always runs on the kernel of a notebook
@@ -74,11 +75,14 @@ that was opened by `jupyter_open_notebook`. A NEW agent follows this flow:
    the server offers, call `jupyter_list_kernels` first.
 3. `jupyter_open_notebook` on a notebook whose kernel was **previously closed** starts a
    NEW kernel bound to the same path and **executes its cells from the first to the last**
-   automatically — that is what rebuilds the in-memory state.
+   automatically — that is what rebuilds the in-memory state. Pass `replay=skip` to load the
+   document without running anything.
 4. Then run code with `jupyter_repl(notebook=<same path>, code=…)`. When a session is
    already active and you are continuing it, `jupyter_repl` simply REUSES it. Runs are
    scratch by default; pass `persist=true` to record a cell. Keep this SAME notebook
    open for the whole task — never shut it down and re-open it to refresh state.
+   Restructure the document with `jupyter_edit_cell` (delete/replace/move/insert a cell)
+   instead of editing the `.ipynb` from outside.
 
 ```text
 you:   "continue my notes/pi.ipynb"
@@ -117,6 +121,35 @@ the task (or open a single new one) and keep passing its `path` to
 `jupyter_repl`. Scratch code that should not be saved still goes through
 `jupyter_repl` (`persist=false`), so nothing extra is written to disk.
 
+### Editing an open notebook — use `jupyter_edit_cell`
+
+The live document is the source of truth, so it is edited **from inside the session**,
+never by an external script (an outside write races the auto-save and can be overwritten —
+issue 1-1). `jupyter_edit_cell` is the minimal editing surface (issue 1-2):
+
+| `action` | parameters | effect |
+| --- | --- | --- |
+| `delete` | `cell_id` | remove a cell (e.g. a probe/error cell) |
+| `replace` | `cell_id`, `source` | swap an existing cell's source, keeping its id and position (its stale outputs are cleared) |
+| `move` | `cell_id`, `position` | reorder a cell to a 0-based index among code cells |
+| `insert` | `source` (optional `after_cell_id` / `position`) | add a NEW, un-executed cell |
+
+Every edit is written to the remote `.ipynb` right away (unless `JUPYTER_REMOTE_AUTOSAVE=0`).
+After a `replace`, re-run the cell with `jupyter_repl(notebook=…, persist=true)` — it
+matches the cell in place and fills the outputs again. To *promote* a scratch/probe run
+into the document, re-run it with `persist=true` and `after_cell_id=<neighbour>` so it
+lands in position instead of at the end (issue 1-4).
+
+### Reading a notebook without replaying it
+
+`jupyter_open_notebook` replays the file's cells from first to last whenever it starts a
+fresh kernel, to rebuild the state. When you only need to READ the file (cell list, saved
+outputs), pass `replay=skip`: the document is loaded and **nothing runs** (issue 1-3), so a
+heavy notebook costs nothing to inspect. The new kernel then has no state — rebuild only
+the cells you need with `jupyter_repl(..., persist=true)`. When a replay does fail, the
+summary separates failures the FILE already recorded as errors (the notebook's old debt)
+from failures this replay produced.
+
 ### Which kernel runs the code? Decided when the notebook is opened.
 
 The Jupyter Server connection (url/token) is user-configured, but **which kernel** serves
@@ -153,7 +186,7 @@ later `jupyter_list_kernels` shows the purpose.
 | `JUPYTER_REMOTE_AUTOSAVE` | on | Upload the notebook snapshot to the remote server after every cell (`=0` disables) |
 | `JUPYTER_REMOTE_SAVE_PATH` | — | Legacy override only for sessions created WITHOUT an explicit path — every session today opens a named notebook, so it is rarely used |
 | `JUPYTER_ENABLE_ADD_DEPENDENCIES` | off | Load the `jupyter_add_dependencies` tool (opt-in, see *Tool gates*) |
-| `JUPYTER_ENABLE_SAVE_NOTEBOOK` | off | Load the `jupyter_save_notebook` tool (opt-in, see *Tool gates*) |
+| `JUPYTER_ENABLE_SAVE_NOTEBOOK` | on | Hide/show the `jupyter_save_notebook` tool (`=0` hides it; default on, see *Tool gates*) |
 
 ## Continuity across conversations
 
@@ -186,13 +219,22 @@ opened is remembered in `~/.pi-jupyter/notebooks.json` (contents path → kernel
 
 ## Remote auto-save
 
-After every RECORDED `jupyter_repl` cell (success, error, or timeout alike) the session
-snapshot is uploaded to the remote Jupyter Server via the Contents API
-(`PUT /api/contents/<path>`). A **scratch** run (`persist=false`, the default) never
-touches the document, so it is not auto-saved.
-The upload is a by-pass: it never blocks or changes the tool result, rapid cells are
+The session snapshot is uploaded to the remote Jupyter Server via the Contents API
+(`PUT /api/contents/<path>`). **When the file is written** (issue 1-6):
+
+- after every RECORDED `jupyter_repl` cell — success, error, or timeout alike — and
+  after every `jupyter_edit_cell` edit;
+- on `shutdown` / `detach` (and `/jupyter-reset`) a final flush runs, but only when
+  something was RECORDED or EDITED this session — a session that only ran scratch code
+  writes nothing;
+- a **scratch** run (`persist=false`, the default) never touches the document, so it is
+  never auto-saved;
+- `JUPYTER_REMOTE_AUTOSAVE=0` disables every remote write; `jupyter_save_notebook` still
+  writes a LOCAL file.
+
+The upload is a by-pass: it never blocks or changes the tool result, rapid changes are
 coalesced (an older snapshot can never overwrite a newer one), and failures only produce a
-warning.
+warning. `jupyter_shutdown_notebook` reports whether its final snapshot was written.
 
 - **Default target = remote `$HOME`.** The file is written to the contents root as the
   notebook's path. In a default `jupyter_server` deployment the contents root *is* the

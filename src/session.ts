@@ -25,6 +25,8 @@ import { Subject } from "./domain/subject";
 import {
   type AutoSaveEvent,
   type AutoSaveInfo,
+  type CellEditOpts,
+  type CellEditOutcome,
   type CellResult,
   type CreateSessionOpts,
   type DocumentCell,
@@ -88,6 +90,12 @@ export class RemoteSession implements Session {
   private slots: NotebookSlot[] = [];
   /** Number of cells executed in this session (drives the autosave flush guard). */
   private executedCells = 0;
+  /**
+   * True once `editCell` has changed the live document. Unlike `executedCells`
+   * (a recording count) this marks a STRUCTURAL edit, so the final flush still
+   * writes the edited document even when no cell ran (issues 1-2 / 1-6).
+   */
+  private docEdited = false;
   /**
    * Outcome of the latest `resume()` — how this session attached to its path
    * ("attached" keeps the live kernel; "started" began a new one). Set by
@@ -339,6 +347,22 @@ export class RemoteSession implements Session {
     // passes the agent's explicit choice; the library default stays true so
     // existing callers (and replay) keep recording.
     const persist = opts.persist ?? true;
+    // A positional insert (`after_cell_id`) is validated BEFORE the code runs,
+    // so a typo cannot execute side effects and then lose the result. It only
+    // applies when this run records a NEW cell — an in-place match keeps its
+    // own document position.
+    let insertAt: number | undefined;
+    if (persist && !inPlaceTarget && opts.afterCellId) {
+      const after = this.slots.findIndex(
+        (s) => s.kind === "code" && s.cellId === opts.afterCellId,
+      );
+      if (after < 0) {
+        throw new Error(
+          `[pi-jupyter] after_cell_id "${opts.afterCellId}" matches no code cell — nothing was executed.`,
+        );
+      }
+      insertAt = after + 1;
+    }
 
     const partial: CellResult = {
       cellId,
@@ -405,7 +429,9 @@ export class RemoteSession implements Session {
       inPlaceTarget.restored = false;
       inPlaceTarget.raw = undefined;
     } else if (persist) {
-      this.slots.push({ kind: "code", cellId, source, result: partial, restored: false });
+      const slot: NotebookSlot = { kind: "code", cellId, source, result: partial, restored: false };
+      if (insertAt !== undefined) this.slots.splice(insertAt, 0, slot);
+      else this.slots.push(slot);
     }
     if (persist) this.executedCells += 1;
     this.viewChanges.next(partial);
@@ -478,9 +504,137 @@ export class RemoteSession implements Session {
         source: s.source,
         executionCount: s.result.executionCount,
         restored: s.restored,
+        ...(s.restored && (s.result.outputs ?? []).some((o) => o.outputType === "error")
+          ? { fileError: true }
+          : {}),
       });
     }
     return out;
+  }
+
+  /**
+   * Structural edit of the live document (issue 1-2): delete / replace / move /
+   * insert one code cell, then flush the change to the remote `.ipynb` so the
+   * FILE is the document — the agent never has to edit it from the outside.
+   *
+   * - `replace` keeps the cell id and document position, drops any file-verbatim
+   *   form, and CLEARS the stale outputs: the old result no longer belongs to
+   *   the new source, and re-running the new source with `persist=true` matches
+   *   this cell in place and fills them again.
+   * - `move` / `insert` address positions by 0-based index among CODE cells.
+   * - every action marks the document dirty, so even a delete-only session
+   *   writes a final snapshot on shutdown.
+   */
+  async editCell(opts: CellEditOpts): Promise<CellEditOutcome> {
+    let affectedId: string | undefined;
+    switch (opts.action) {
+      case "delete": {
+        const idx = this.requireCodeSlotIndex(opts.cellId, "delete");
+        const [removed] = this.slots.splice(idx, 1);
+        affectedId = removed.kind === "code" ? removed.cellId : undefined;
+        break;
+      }
+      case "replace": {
+        const idx = this.requireCodeSlotIndex(opts.cellId, "replace");
+        if (opts.source === undefined) {
+          throw new Error("[pi-jupyter] `source` is required to replace a cell.");
+        }
+        const slot = this.slots[idx] as Extract<NotebookSlot, { kind: "code" }>;
+        slot.source = opts.source;
+        slot.restored = false;
+        slot.raw = undefined;
+        slot.result = {
+          cellId: slot.cellId,
+          executionId: `edit-${randomUUID().slice(0, 8)}`,
+          status: "done",
+          success: true,
+          outputs: [],
+        };
+        affectedId = slot.cellId;
+        break;
+      }
+      case "move": {
+        const idx = this.requireCodeSlotIndex(opts.cellId, "move");
+        if (opts.position === undefined || !Number.isInteger(opts.position) || opts.position < 0) {
+          throw new Error(
+            "[pi-jupyter] `position` (a 0-based index among code cells) is required to move a cell.",
+          );
+        }
+        const [slot] = this.slots.splice(idx, 1);
+        this.insertAmongCode(slot, opts.position);
+        affectedId = slot.kind === "code" ? slot.cellId : undefined;
+        break;
+      }
+      case "insert": {
+        if (opts.source === undefined) {
+          throw new Error("[pi-jupyter] `source` is required to insert a cell.");
+        }
+        const cellId = `cell-${randomUUID().slice(0, 8)}`;
+        const slot: NotebookSlot = {
+          kind: "code",
+          cellId,
+          source: opts.source,
+          restored: false,
+          result: {
+            cellId,
+            executionId: `edit-${randomUUID().slice(0, 8)}`,
+            status: "done",
+            success: true,
+            outputs: [],
+          },
+        };
+        if (opts.afterCellId) {
+          const after = this.requireCodeSlotIndex(opts.afterCellId, "insert after");
+          this.slots.splice(after + 1, 0, slot);
+        } else if (opts.position !== undefined) {
+          this.insertAmongCode(slot, opts.position);
+        } else {
+          this.slots.push(slot);
+        }
+        affectedId = cellId;
+        break;
+      }
+    }
+    this.docEdited = true;
+    // Persist the edit now (bounded) so the tool can report a WRITTEN file, not
+    // just a pending one. A failed PUT only warns, exactly like a cell autosave.
+    await this.flushAutoSave(FLUSH_TIMEOUT_MS);
+    const cells = this.listCells();
+    const index = affectedId ? cells.findIndex((c) => c.cellId === affectedId) : -1;
+    return {
+      action: opts.action,
+      ...(affectedId ? { cellId: affectedId } : {}),
+      ...(index >= 0 ? { index } : {}),
+      cells,
+    };
+  }
+
+  /** Slot index of the code cell `cellId`, or a clear error naming the action. */
+  private requireCodeSlotIndex(cellId: string | undefined, action: string): number {
+    const id = cellId?.trim();
+    if (!id) throw new Error(`[pi-jupyter] \`cell_id\` is required to ${action} a cell.`);
+    const idx = this.slots.findIndex((s) => s.kind === "code" && s.cellId === id);
+    if (idx < 0) {
+      throw new Error(
+        `[pi-jupyter] no code cell with id "${id}" — list the cell ids with` +
+          " jupyter_open_notebook (details.cells) or jupyter_outputs(path).",
+      );
+    }
+    return idx;
+  }
+
+  /**
+   * Put `slot` where it becomes the `position`-th CODE cell (clamped to the
+   * end), keeping the surrounding markdown/raw cells in place.
+   */
+  private insertAmongCode(slot: NotebookSlot, position: number): void {
+    const codeIdx: number[] = [];
+    this.slots.forEach((s, i) => {
+      if (s.kind === "code") codeIdx.push(i);
+    });
+    const target = Math.max(0, Math.min(position, codeIdx.length));
+    const at = target < codeIdx.length ? codeIdx[target] : this.slots.length;
+    this.slots.splice(at, 0, slot);
   }
 
   /**
@@ -526,7 +680,17 @@ export class RemoteSession implements Session {
   }
 
   async getRuntimeStatus(): Promise<RuntimeStatus | undefined> {
-    if (!this.kernel) return { status: "stopped", lifecycle: "stopped" };
+    if (!this.kernel) {
+      // Keep the observability side-channel after teardown: the shutdown tool
+      // reads `lastAutoSave` to report whether a final snapshot was written
+      // (issue 1-6).
+      return {
+        status: "stopped",
+        lifecycle: "stopped",
+        warnings: this.warnings,
+        lastAutoSave: this.lastAutoSave,
+      };
+    }
     return {
       status: this.kernel.connectionStatus,
       lifecycle: this.kernel.isDisposed ? "stopped" : "running",
@@ -761,7 +925,7 @@ export class RemoteSession implements Session {
    */
   async flushAutoSave(timeoutMs: number = FLUSH_TIMEOUT_MS): Promise<void> {
     if (!this.config.remoteAutoSave) return;
-    if (this.executedCells > 0) {
+    if (this.executedCells > 0 || this.docEdited) {
       this.autoSaveDirty = true;
       this.pumpAutoSave();
     }

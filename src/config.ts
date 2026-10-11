@@ -23,10 +23,13 @@
  * timeout), and JUPYTER_KEEP_KERNELS=0 (legacy: kill named-notebook kernels
  * when a pi conversation ends; default keeps them running on the server so a
  * new conversation can re-attach to the same notebook and keep its variables).
- * Tool gates (both OPT-IN, default OFF): JUPYTER_ENABLE_ADD_DEPENDENCIES=1 and
- * JUPYTER_ENABLE_SAVE_NOTEBOOK=1 (or "enableAddDependencies" / "enableSaveNotebook"
- * in the config file) load the jupyter_add_dependencies / jupyter_save_notebook
- * tools respectively. When a gate is false the tool is not registered at all.
+ * Tool gates: JUPYTER_ENABLE_ADD_DEPENDENCIES=1 (or `"enableAddDependencies": true`
+ * in the config file) loads jupyter_add_dependencies — OPT-IN, default OFF, since
+ * installing packages is a real side effect. jupyter_save_notebook is gated by
+ * JUPYTER_ENABLE_SAVE_NOTEBOOK / `"enableSaveNotebook"` and defaults ON
+ * (issue 1-5): it is the local "dump the live document to a file" escape hatch;
+ * set it to 0/false to hide the tool. When a gate is false the tool is not
+ * registered at all.
  */
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -68,8 +71,9 @@ export interface ShimConfig {
    */
   enableAddDependencies: boolean;
   /**
-   * Load the jupyter_save_notebook tool? OPT-IN: default false — when false
-   * the tool is not registered at all (see ARCHITECTURE.md).
+   * Load the jupyter_save_notebook tool? Default ON (issue 1-5) — the local
+   * "dump the live document to a file" escape hatch; set
+   * JUPYTER_ENABLE_SAVE_NOTEBOOK=0 (or `"enableSaveNotebook": false`) to hide it.
    */
   enableSaveNotebook: boolean;
 }
@@ -135,24 +139,25 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     remoteSavePath: nonEmpty(
       env.JUPYTER_REMOTE_SAVE_PATH ?? (file.remoteSavePath as string | undefined),
     ),
-    // Tool gates are OPT-IN (default false): the extension registers
-    // jupyter_add_dependencies / jupyter_save_notebook only when enabled.
+    // Tool gates: add-dependencies OPT-IN (default false), save-notebook default
+    // true — the extension registers each tool only when its gate is on.
     enableAddDependencies: gateFrom(env, file, "JUPYTER_ENABLE_ADD_DEPENDENCIES", "enableAddDependencies"),
-    enableSaveNotebook: gateFrom(env, file, "JUPYTER_ENABLE_SAVE_NOTEBOOK", "enableSaveNotebook"),
+    enableSaveNotebook: gateFrom(env, file, "JUPYTER_ENABLE_SAVE_NOTEBOOK", "enableSaveNotebook", true),
   };
 }
 
 /**
- * Which OPT-IN tools the extension registers (jupyter_add_dependencies /
- * jupyter_save_notebook). Resolved env > config file > default (false) WITHOUT
- * requiring url/token, so the unconfigured stub path can apply the same gates —
- * the tool list stays stable before and after configuration (UX-8).
+ * Which gated tools the extension registers (jupyter_add_dependencies /
+ * jupyter_save_notebook). Resolved env > config file > default (false for
+ * add-dependencies, true for save-notebook) WITHOUT requiring url/token, so the
+ * unconfigured stub path can apply the same gates — the tool list stays stable
+ * before and after configuration (UX-8).
  */
 export function loadToolGates(env: Record<string, string | undefined> = process.env): ToolGates {
   const file = readConfigFile();
   return {
     enableAddDependencies: gateFrom(env, file, "JUPYTER_ENABLE_ADD_DEPENDENCIES", "enableAddDependencies"),
-    enableSaveNotebook: gateFrom(env, file, "JUPYTER_ENABLE_SAVE_NOTEBOOK", "enableSaveNotebook"),
+    enableSaveNotebook: gateFrom(env, file, "JUPYTER_ENABLE_SAVE_NOTEBOOK", "enableSaveNotebook", true),
   };
 }
 
@@ -179,7 +184,7 @@ function readConfigFile(): Record<string, unknown> {
   }
 }
 
-/** The two OPT-IN tool gates — see ShimConfig. */
+/** The two tool gates — see ShimConfig. */
 export interface ToolGates {
   enableAddDependencies: boolean;
   enableSaveNotebook: boolean;
@@ -194,11 +199,15 @@ function gateFrom(
   file: Record<string, unknown>,
   envKey: string,
   fileKey: string,
+  /** Value when neither env nor the config file sets the key (default OFF). */
+  defaultOn = false,
 ): boolean {
   const v = env[envKey];
   if (v === "1") return true;
   if (v === "0") return false;
-  return file[fileKey] === true;
+  if (file[fileKey] === true) return true;
+  if (file[fileKey] === false) return false;
+  return defaultOn;
 }
 
 function intEnv(env: Record<string, string | undefined>, k: string): number | undefined {

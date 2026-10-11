@@ -192,10 +192,12 @@ document order) let the tool layer tell the agent exactly what is there.
    (`path`, or `local_file` to import). `jupyter_list_kernels` first when the
    kernels are unknown.
 3. If the open result says `started`, the previously-closed session was replayed
-   from first to last (state restored, failures listed).
+   from first to last (state restored, failures listed); pass `replay=skip` to load
+   the document without executing anything (read-only inspection).
 4. Continuing an active session → `jupyter_repl(notebook=<same path>, code=…)`
    reuses the session. Runs are scratch unless `persist=true`; `jupyter_outputs(path)` shows the outputs already
-   stored in the file.
+   stored in the file. Restructure the document itself with `jupyter_edit_cell`
+   (delete/replace/move/insert a cell) — never by editing the `.ipynb` from outside.
 
 The flow is deliberately **single-notebook**: `jupyter_open_notebook` is called
 once to start/continue a session, and every later step reuses it. It is NOT an
@@ -220,11 +222,9 @@ logical cell, like JupyterLab. Only code that matches no existing cell appends a
 new code slot. Replaying a file with a fresh kernel therefore does not
 duplicate the document — each logical cell executes once in place.
 
-### Scratch runs, saved outputs, and replay diagnostics (v3.1)
+### Scratch runs, editable documents, and replay diagnostics (v3.2)
 
-Four agent-experience fixes sit on top of the v3 model; all are pi-side and
-touching no data:
-
+Agent-experience fixes sit on top of the v3 model; all are pi-side and touch no data:
 - **`jupyter_repl` is scratch by default.** `RunCellOpts.persist` (default `true`
   in the library, `false` from the tool) decides whether a run is written into the
   document: `persist: false` executes on the kernel and returns the result, but
@@ -233,6 +233,22 @@ touching no data:
   JupyterLab-like behavior (in-place re-run or append) and triggers the remote
   auto-save. `replayFromStart` records (its default), so a resumed file keeps its
   cell ids and execution counts.
+- **The document itself is editable, in-plugin (issue 1-2).** `Session.editCell`
+  implements delete / replace / move / insert over the live slot array and then
+  flushes the snapshot; `jupyter_edit_cell` exposes it. `replace` keeps the cell id
+  and position, drops the file-verbatim `raw`, and clears the stale outputs (so
+  re-running the new source with `persist=true` matches it in place). This is what
+  removes the old external-script workflow whose write raced the auto-save.
+- **`persist=true` can record a cell by position (issue 1-4).** `RunCellOpts.afterCellId`
+  places a newly-recorded cell directly after a given cell id instead of appending —
+  the bridge that promotes a scratch/probe run into the document where it belongs.
+  The id is validated BEFORE the kernel runs, so a typo cannot execute and then lose
+  the result.
+- **`jupyter_open_notebook(replay="skip")` (issue 1-3).** A fresh kernel normally
+  replays the file's cells to rebuild state; `skip` loads the document only and
+  executes nothing. The replay report additionally splits root causes into failures
+  the FILE already recorded as errors (`DocumentCell.fileError`) and failures this
+  replay produced, so historical debt is not mistaken for a new bug.
 - **`jupyter_outputs(path)` is a read-only escape hatch.** It reads the `.ipynb`
   via `ServerPort.readNotebook`, parses it with `parseNotebook`, and reuses
   `formatResult`, so the agent can re-read a stored table/p-value (text + inline
@@ -252,6 +268,10 @@ Continuation is only possible if the kernel survives the conversation, so the
 `session_shutdown` cleanup **detaches** instead of shutting down:
 `RemoteSession.detach()` flushes the final snapshot and disposes this client's
 connections but leaves the server-side kernel/session row running.
+A final flush (in `shutdown()` / `detach()`) only sends a PUT when something was
+recorded or edited this session (`executedCells > 0 || docEdited`); otherwise it
+writes nothing, and `jupyter_shutdown_notebook` reports whether its snapshot was
+written (issue 1-6).
 
 - **All sessions are notebook sessions** (opened via `jupyter_open_notebook`),
   and are detached by default (`config.keepKernels`, env `JUPYTER_KEEP_KERNELS=0`

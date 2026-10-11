@@ -1053,3 +1053,141 @@ describe("normalizeContentsPath", () => {
     expect(() => normalizeContentsPath("  ")).toThrow(/required/);
   });
 });
+
+// ── issue 1-2: in-plugin cell editing ────────────────────────────────────────
+
+describe("RemoteSession — editCell (issue 1-2)", () => {
+  let kernel: ReturnType<typeof makeKernelPort>;
+  let server: ReturnType<typeof makeServerPort>;
+
+  beforeEach(() => {
+    kernel = makeKernelPort();
+    server = makeServerPort(kernel);
+  });
+
+  it("delete removes a file cell and writes the edited document", async () => {
+    server.readNotebook.mockResolvedValue(FILE_NB());
+    const s = new RemoteSession(server, CONFIG, { contentsPath: "notes/pi.ipynb" });
+    await s.resume("notes/pi.ipynb");
+    expect(s.listCells()).toHaveLength(1);
+
+    const out = await s.editCell({ action: "delete", cellId: "cell-a" });
+    expect(out.action).toBe("delete");
+    expect(out.cells).toHaveLength(0);
+
+    const model = server.uploadNotebook.mock.calls.at(-1)?.[1] as { cells: any[] };
+    // Only the verbatim markdown cell is left — the code cell is gone.
+    expect(model.cells).toHaveLength(1);
+    expect(model.cells[0].cell_type).toBe("markdown");
+  });
+
+  it("replace keeps the cell id and position and clears the stale outputs", async () => {
+    server.readNotebook.mockResolvedValue(FILE_NB());
+    const s = new RemoteSession(server, CONFIG, { contentsPath: "notes/pi.ipynb" });
+    await s.resume("notes/pi.ipynb");
+
+    const out = await s.editCell({
+      action: "replace",
+      cellId: "cell-a",
+      source: "import numpy as np  # v2",
+    });
+    expect(out.cellId).toBe("cell-a");
+    expect(out.index).toBe(0);
+    const [cell] = s.listCells();
+    expect(cell.cellId).toBe("cell-a");
+    expect(cell.source).toBe("import numpy as np  # v2");
+    expect(cell.restored).toBe(false);
+
+    const model = server.uploadNotebook.mock.calls.at(-1)?.[1] as { cells: any[] };
+    const code = model.cells.find((c) => c.cell_type === "code");
+    expect(code.id).toBe("cell-a");
+    expect(code.execution_count).toBeNull();
+    expect(code.outputs).toEqual([]);
+  });
+
+  it("insert places a cell after a given id; move reorders it", async () => {
+    server.readNotebook.mockResolvedValue(FILE_NB());
+    const s = new RemoteSession(server, CONFIG, { contentsPath: "notes/pi.ipynb" });
+    await s.resume("notes/pi.ipynb");
+    await s.runCell("b <- 2", { persist: true });
+    await s.runCell("c <- 3", { persist: true });
+
+    const inserted = await s.editCell({
+      action: "insert",
+      source: "a <- 1",
+      afterCellId: "cell-a",
+    });
+    const id = inserted.cellId as string;
+    expect(s.listCells().map((c) => c.source)).toEqual([
+      "import numpy as np",
+      "a <- 1",
+      "b <- 2",
+      "c <- 3",
+    ]);
+
+    const moved = await s.editCell({ action: "move", cellId: id, position: 3 });
+    expect(moved.index).toBe(3);
+    expect(s.listCells().map((c) => c.source)).toEqual([
+      "import numpy as np",
+      "b <- 2",
+      "c <- 3",
+      "a <- 1",
+    ]);
+  });
+
+  it("rejects unknown ids and missing required fields", async () => {
+    const s = new RemoteSession(server, CONFIG, { notebookId: "nb-edit" });
+    await s.initialize();
+    await s.runCell("x = 1", { persist: true });
+    await expect(s.editCell({ action: "delete", cellId: "nope" })).rejects.toThrow(
+      /no code cell with id "nope"/,
+    );
+    await expect(
+      s.editCell({ action: "replace", cellId: s.listCells()[0].cellId }),
+    ).rejects.toThrow(/`source` is required/);
+    await expect(s.editCell({ action: "move", cellId: s.listCells()[0].cellId })).rejects.toThrow(
+      /`position`/,
+    );
+  });
+
+  it("listCells flags a file cell whose recorded outputs include an error (issue 1-3)", async () => {
+    const file = FILE_NB();
+    (file.cells[1] as any).outputs = [
+      { output_type: "error", ename: "Error", evalue: "old debt", traceback: [] },
+    ];
+    server.readNotebook.mockResolvedValue(file);
+    const s = new RemoteSession(server, CONFIG, { contentsPath: "notes/pi.ipynb" });
+    await s.resume("notes/pi.ipynb");
+    expect(s.listCells()[0].fileError).toBe(true);
+  });
+});
+
+describe("RemoteSession — after_cell_id insert (issue 1-4)", () => {
+  let kernel: ReturnType<typeof makeKernelPort>;
+  let server: ReturnType<typeof makeServerPort>;
+
+  beforeEach(() => {
+    kernel = makeKernelPort();
+    server = makeServerPort(kernel);
+  });
+
+  it("persist=true records the new cell in position instead of appending", async () => {
+    const s = new RemoteSession(server, CONFIG, { notebookId: "nb-after" });
+    await s.initialize();
+    const first = await s.runCell("a <- 1", { persist: true });
+    await s.runCell("c <- 3", { persist: true });
+    const mid = await s.runCell("b <- 2", { persist: true, afterCellId: first.cellId });
+    expect(mid.cellId).not.toBe(first.cellId);
+    expect(s.listCells().map((c) => c.source)).toEqual(["a <- 1", "b <- 2", "c <- 3"]);
+  });
+
+  it("an unknown after_cell_id rejects BEFORE the code executes", async () => {
+    const s = new RemoteSession(server, CONFIG, { notebookId: "nb-after-bad" });
+    await s.initialize();
+    kernel.execute.mockClear();
+    await expect(
+      s.runCell("boom", { persist: true, afterCellId: "nope" }),
+    ).rejects.toThrow(/after_cell_id "nope"/);
+    expect(kernel.execute).not.toHaveBeenCalled();
+  });
+});

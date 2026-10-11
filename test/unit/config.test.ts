@@ -109,19 +109,19 @@ describe("keepKernels (notebook continuity policy)", () => {
 });
 
 describe("tool gates (enableAddDependencies / enableSaveNotebook)", () => {
-  it("default to false — the tools are not loaded", () => {
+  it("add-dependencies defaults OFF; save-notebook defaults ON (issue 1-5)", () => {
     const cfg = loadConfig(BASE);
     expect(cfg.enableAddDependencies).toBe(false);
-    expect(cfg.enableSaveNotebook).toBe(false);
+    expect(cfg.enableSaveNotebook).toBe(true);
     expect(loadToolGates(BASE)).toEqual({
       enableAddDependencies: false,
-      enableSaveNotebook: false,
+      enableSaveNotebook: true,
     });
   });
 
   it("each gate toggles independently via env 1/0", () => {
     expect(loadConfig({ ...BASE, JUPYTER_ENABLE_ADD_DEPENDENCIES: "1" }).enableAddDependencies).toBe(true);
-    expect(loadConfig({ ...BASE, JUPYTER_ENABLE_ADD_DEPENDENCIES: "1" }).enableSaveNotebook).toBe(false);
+    expect(loadConfig({ ...BASE, JUPYTER_ENABLE_ADD_DEPENDENCIES: "1" }).enableSaveNotebook).toBe(true);
     expect(loadConfig({ ...BASE, JUPYTER_ENABLE_SAVE_NOTEBOOK: "1" }).enableSaveNotebook).toBe(true);
     expect(loadConfig({ ...BASE, JUPYTER_ENABLE_ADD_DEPENDENCIES: "1", JUPYTER_ENABLE_SAVE_NOTEBOOK: "1" }).enableSaveNotebook).toBe(true);
     expect(loadConfig({ ...BASE, JUPYTER_ENABLE_SAVE_NOTEBOOK: "0" }).enableSaveNotebook).toBe(false);
@@ -159,10 +159,10 @@ describe("tool gates (enableAddDependencies / enableSaveNotebook)", () => {
   });
 
   it("loadToolGates needs no url/token (stable tool list unconfigured)", () => {
-    expect(loadToolGates({})).toEqual({ enableAddDependencies: false, enableSaveNotebook: false });
+    expect(loadToolGates({})).toEqual({ enableAddDependencies: false, enableSaveNotebook: true });
     expect(loadToolGates({ JUPYTER_ENABLE_ADD_DEPENDENCIES: "1" })).toEqual({
       enableAddDependencies: true,
-      enableSaveNotebook: false,
+      enableSaveNotebook: true,
     });
   });
 });
