@@ -13,7 +13,9 @@
 export {
   type CellResult,
   type CellStatus,
+  type ContentsEntry,
   type CreateSessionOpts,
+  type DirectoryListing,
   type JsOutput,
   type MimeEntry,
   type NormalizedMimebundle,
@@ -39,11 +41,21 @@ export {
 export { buildInstallCode } from "./domain/deps";
 export { BOOTSTRAP_CODE, MISSING_PACKAGES_PROBE, parseMissingPackages } from "./domain/bootstrap";
 export { Subject } from "./domain/subject";
+export {
+  isDescendant,
+  isDirectChild,
+  mergeNotebookRows,
+  type LiveSessionEntry,
+  type MergeListingInput,
+  type MergeListingResult,
+  type NotebookRegistryEntry,
+  type NotebookRow,
+} from "./domain/listing";
 
 // ── kernel (adapters) ───────────────────────────────────────────────────────
 export type { ExecuteOptions, ExecuteOutcome, KernelPort, ServerPort, ServerSessionModel } from "./kernel/port";
 export { JupyterKernel } from "./kernel/kernel";
-export { JupyterServer } from "./kernel/server";
+export { JupyterServer, normalizeContentsDir } from "./kernel/server";
 export { fromIOPub } from "./kernel/convert";
 
 // ── config + session + purpose notes ───────────────────────────────────────

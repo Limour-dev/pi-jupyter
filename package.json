@@ -1,6 +1,6 @@
 {
   "name": "pi-jupyter",
-  "version": "2.6.1",
+  "version": "2.7.0",
   "private": true,
   "type": "module",
   "description": "Remote Jupyter-backed REPL for pi coding agents. Pure TypeScript, no local backend — runs code (Python, R, …) on a remote Jupyter Server via @jupyterlab/services. The kernel is discovered and chosen by the agent per call; the server connection is user-configured. Hexagonal architecture: pure domain core behind a KernelPort seam.",

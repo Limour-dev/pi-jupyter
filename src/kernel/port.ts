@@ -6,7 +6,7 @@
  * `@jupyterlab/services` complexity.  This is what makes the session testable
  * offline: inject a mock KernelPort and no real Jupyter Server is needed.
  */
-import type { JsOutput } from "../domain/types";
+import type { DirectoryListing, JsOutput } from "../domain/types";
 
 export type ExecuteOptions = {
   timeoutMs?: number;
@@ -97,6 +97,16 @@ export interface ServerPort {
   findLiveSession(contentsPath: string): Promise<ServerSessionModel | null>;
   /** All live sessions on the server (GET /api/sessions) — for listing candidates. */
   listSessions(): Promise<ServerSessionModel[]>;
+  /**
+   * List a remote contents DIRECTORY (GET /api/contents/<dir>?content=1).
+   * Returns the entries directly inside it; with `recursive` it walks every
+   * subdirectory too (bounded by depth/entry caps). A missing directory is a
+   * normal answer (`{ exists: false, entries: [] }`), NOT an error, so callers
+   * can tell "the folder is empty" apart from "the folder does not exist" —
+   * this is what makes `jupyter_list_notebooks` show files that were never
+   * opened by pi (the registry alone produced ghosts and hid real files).
+   */
+  listDirectory(dir: string, opts?: { recursive?: boolean }): Promise<DirectoryListing>;
   /**
    * Attach a NEW client to an already-running session's kernel (no new
    * kernel on the server — in-memory state is preserved).

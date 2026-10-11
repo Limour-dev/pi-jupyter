@@ -36,12 +36,19 @@ export const JUPYTER_PARAMS = Type.Object({
   notebook: NOTEBOOK,
   code: Type.String({
     description:
-      "Code to execute in the notebook's persistent kernel. Use print()/display() for side effects; the last expression's repr is the result. Re-running the same source as an existing cell executes it in place (same cell id, no duplicate); new code appends a cell.",
+      "Code to execute in the notebook's persistent kernel. Use print()/display() for side effects; the last expression's repr is the result. SCRATCH by default: the output comes back but the document is untouched unless `persist=true`, in which case re-running an existing same-source cell updates it in place (same cell id, no duplicate) and new code appends a cell.",
   }),
   timeout_secs: Type.Optional(
     Type.Number({
       description: "Max seconds to wait for execution (default 120).",
       default: 120,
+    }),
+  ),
+  persist: Type.Optional(
+    Type.Boolean({
+      description:
+        "Record this run in the notebook document? Default false = SCRATCH: the code runs on the kernel and its output is returned, but it is NOT added as a cell and does NOT modify an existing matching cell, so exploratory/probe code never pollutes the saved .ipynb. Pass true when the run is real work worth keeping: an existing same-source cell then re-runs in place, or a new cell is appended, and the remote auto-save picks it up.",
+      default: false,
     }),
   ),
 });
@@ -83,16 +90,49 @@ export const LIST_NOTEBOOKS_PARAMS = Type.Object({
   /**
    * REQUIRED remote contents directory the listing is scoped to — the same
    * "/"-separated coordinate space the listed paths live in (e.g. "notes").
-   * Only notebook sessions whose path sits DIRECTLY in that directory are
-   * shown; the listing NEVER recurses into subdirectories, so the tool stays
-   * small and relevant as more folders accumulate on the server. Pass "."
-   * for the server root (top-level notebooks only).
+   * The listing is built from the SERVER's contents API (the files that really
+   * exist), merged with live /api/sessions rows and pi's opened-notebooks
+   * registry; by default only notebooks sitting DIRECTLY in `dir` are shown.
+   * Pass "." for the server root.
    */
   dir: Type.String({
     minLength: 1,
     description:
-      'Remote contents directory the listing is scoped to (required) — the same "/"-separated coordinate space the listed paths use, e.g. "notes". Shows ONLY notebook sessions whose path sits DIRECTLY in this directory; the listing NEVER recurses into subdirectories (notes/sub/….ipynb is hidden), keeping it small as more folders accumulate. Pass "." for the server root (top-level notebooks only).',
+      'Remote contents directory the listing is scoped to (required) — the same "/"-separated coordinate space the listed paths use, e.g. "notes". The listing is read from the server\'s contents API (so notebooks pi never opened are visible) and merged with live kernels and pi\'s registry; stale registry entries whose file no longer exists are dropped. By default only notebooks DIRECTLY in this directory are shown (no recursion — set recursive=true to include subdirectories). Pass "." for the server root.',
   }),
+  recursive: Type.Optional(
+    Type.Boolean({
+      description:
+        "Include notebooks in every subdirectory of `dir`, not just its direct children. Default false (one level only) — turn it on when you are searching for a notebook instead of paging through folders one at a time.",
+      default: false,
+    }),
+  ),
+  query: Type.Optional(
+    Type.String({
+      description:
+        "Case-insensitive substring filter on the full contents path (e.g. \"imh\" shows every path containing imh). Combine with recursive=true to search a whole tree in one call.",
+    }),
+  ),
+});
+
+/**
+ * Read-only outputs tool: show the outputs a notebook FILE already records,
+ * WITHOUT touching a kernel or replaying anything. This is the escape hatch
+ * when an open/replay summary is not enough — it renders the `.ipynb`'s stored
+ * outputs (text + inline images) so the agent never has to parse the JSON by
+ * hand.
+ */
+export const OUTPUTS_PARAMS = Type.Object({
+  path: Type.String({
+    description:
+      'Remote contents path of the notebook whose SAVED outputs to show, e.g. "notes/pi.ipynb". Read-only: no kernel is started and nothing is executed.',
+  }),
+  cell_id: Type.Optional(
+    Type.String({
+      description:
+        "Only show the code cell with this id (as reported by jupyter_open_notebook / jupyter_repl). Omit to show every code cell.",
+    }),
+  ),
 });
 
 export const SHUTDOWN_NOTEBOOK_PARAMS = Type.Object({
@@ -120,5 +160,6 @@ export type AddDependenciesParams = Static<typeof ADD_DEPENDENCIES_PARAMS>;
 export type SaveNotebookParams = Static<typeof SAVE_NOTEBOOK_PARAMS>;
 export type ListNotebooksParams = Static<typeof LIST_NOTEBOOKS_PARAMS>;
 export type OpenNotebookParams = Static<typeof OPEN_NOTEBOOK_PARAMS>;
+export type OutputsParams = Static<typeof OUTPUTS_PARAMS>;
 export type ShutdownNotebookParams = Static<typeof SHUTDOWN_NOTEBOOK_PARAMS>;
 export type SetKernelPurposeParams = Static<typeof SET_KERNEL_PURPOSE_PARAMS>;

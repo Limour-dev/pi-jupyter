@@ -333,6 +333,12 @@ export class RemoteSession implements Session {
     const cellId = inPlaceTarget?.cellId ?? `cell-${randomUUID().slice(0, 8)}`;
     const executionId = `exec-${randomUUID().slice(0, 8)}`;
     const timeoutMs = opts.timeoutMs ?? this.config.defaultTimeoutMs;
+    // Scratch default: when persist is off the result is returned but the live
+    // document is left untouched (no append, no in-place update, no autosave),
+    // so exploratory code cannot pollute the saved .ipynb. The tool layer
+    // passes the agent's explicit choice; the library default stays true so
+    // existing callers (and replay) keep recording.
+    const persist = opts.persist ?? true;
 
     const partial: CellResult = {
       cellId,
@@ -390,7 +396,7 @@ export class RemoteSession implements Session {
       ];
     }
 
-    if (inPlaceTarget) {
+    if (persist && inPlaceTarget) {
       // The targeted cell (restored or run earlier this session) now carries
       // THIS kernel's result. A restored slot drops its verbatim `raw` so the
       // fresh record serializes from here on; an already-live slot just gets
@@ -398,15 +404,15 @@ export class RemoteSession implements Session {
       inPlaceTarget.result = partial;
       inPlaceTarget.restored = false;
       inPlaceTarget.raw = undefined;
-    } else {
+    } else if (persist) {
       this.slots.push({ kind: "code", cellId, source, result: partial, restored: false });
     }
-    this.executedCells += 1;
+    if (persist) this.executedCells += 1;
     this.viewChanges.next(partial);
     // Snapshot auto-save after every cell record — done/error/timeout alike
     // (FR-1.2). Runs in the background and is never awaited, so a failure can
     // never change this result (FR-6.1).
-    this.scheduleAutoSave();
+    if (persist) this.scheduleAutoSave();
     return partial;
   }
 

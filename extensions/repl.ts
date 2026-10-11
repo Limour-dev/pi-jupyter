@@ -11,12 +11,13 @@
  *   src/domain/             pure logic
  * Notebook-first execution — how a NEW agent session should drive this
  * extension:
- *   - `jupyter_list_notebooks(dir=…)` first: it shows the notebooks in ONE
- *     remote contents directory (required `dir`, direct children ONLY — it never
- *     recurses into subdirectories, so the list stays scoped as more folders
- *     accumulate) that are ACTIVE (open this conversation / LIVE kernel on the
- *     server) or resumable from a saved file (~/.pi-jupyter/notebooks.json
- *     merged with /api/sessions). Pass "." for the server root.
+ *   - `jupyter_list_notebooks(dir=…)` first: it shows the notebooks that EXIST
+ *     on the server in ONE remote contents directory (required `dir`; read from
+ *     the contents API, so files pi never opened are visible) merged with LIVE
+ *     /api/sessions rows and the ~/.pi-jupyter/notebooks.json registry — a
+ *     registry entry whose file is gone is dropped as stale. Only direct
+ *     children are listed unless `recursive=true` (add `query` to search by
+ *     path). Pass "." for the server root.
  *   - No active session yet, or switching to another notebook → CONTINUE one
  *     with `jupyter_open_notebook` (a `path` from jupyter_list_notebooks, or a
  *     `local_file` to import). When the agent does not know which kernels the
@@ -27,7 +28,10 @@
  *     cells FROM FIRST TO LAST, so the in-memory state is rebuilt before any
  *     jupyter_repl call. A LIVE kernel is ATTACHED instead (no new kernel, no
  *     re-run — variables/imports survive). With an active session, each
- *     jupyter_repl(notebook=…) REUSES that session.
+ *     jupyter_repl(notebook=…) REUSES that session. Runs are SCRATCH by
+ *     default (`persist=false`): the output is returned but the document is not
+ *     modified. Pass `persist=true` to record a cell; use jupyter_outputs(path)
+ *     to read outputs already saved in a file.
  *   - There are NO anonymous per-kernel sessions anymore: jupyter_repl /
  *     jupyter_add_dependencies / jupyter_save_notebook all require a
  *     `notebook` path. Which kernel serves a notebook is fixed when it is
@@ -76,11 +80,13 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
 import { CONFIG_HINT, isConfigured, loadConfig, loadToolGates } from "../src/config";
-import type { ResumeOutcome, Session } from "../src/domain/types";
+import type { CellResult, ContentsEntry, ResumeOutcome, Session } from "../src/domain/types";
+import { mergeNotebookRows } from "../src/domain/listing";
+import { parseNotebook } from "../src/domain/notebook";
 import { JupyterServer } from "../src/kernel/server";
 import { loadNotebooks, touchNotebook } from "../src/notebooks";
 import { normalizeContentsPath, RemoteSession } from "../src/session";
-import { formatResult } from "./format";
+import { formatResult, stripAnsi } from "./format";
 import { loadPurposes, savePurposes } from "../src/purposes";
 import {
   ADD_DEPENDENCIES_PARAMS,
@@ -88,6 +94,7 @@ import {
   LIST_KERNELS_PARAMS,
   LIST_NOTEBOOKS_PARAMS,
   OPEN_NOTEBOOK_PARAMS,
+  OUTPUTS_PARAMS,
   SAVE_NOTEBOOK_PARAMS,
   SET_KERNEL_PURPOSE_PARAMS,
   SHUTDOWN_NOTEBOOK_PARAMS,
@@ -95,6 +102,7 @@ import {
   type JupyterParams,
   type ListNotebooksParams,
   type OpenNotebookParams,
+  type OutputsParams,
   type SaveNotebookParams,
   type SetKernelPurposeParams,
   type ShutdownNotebookParams,
@@ -124,35 +132,69 @@ function expandHome(userPath: string): string {
   return userPath;
 }
 
-/**
- * Does a remote contents path sit DIRECTLY inside a directory — its parent is
- * exactly that directory, never deeper? `jupyter_list_notebooks(dir=…)` scopes
- * its listing with this predicate: "the notebooks in notes/" shows notes/a.ipynb
- * but never notes/sub/a.ipynb (no recursion into subdirectories). Matching
- * happens in remote-contents coordinates — the same "/"-separated strings the
- * listing shows — and each side is normalized first ("./" and leading/trailing
- * "/" stripped, so "notes/" ≡ "notes" and "./notes/a.ipynb" ≡ "notes/a.ipynb").
- * The server root is written "." and matches only top-level notebooks.
- */
-function isDirectChild(contentsPath: string, dir: string): boolean {
-  const normalize = (p: string) =>
-    p.trim()
-      .replace(/\\/g, "/")
-      .replace(/^(?:\.\/)+/, "")
-      .replace(/^\/+/, "")
-      .replace(/\/+$/, "");
-  // A bare "." denotes the root — drop empty and "." segments so both "." and ""
-  // collapse to the empty dirSegs handled below (top-level notebooks only).
-  const segments = (p: string) => normalize(p).split("/").filter((s) => s !== "" && s !== ".");
-  const fileSegs = segments(contentsPath);
-  const dirSegs = segments(dir);
-  if (dirSegs.length === 0) return fileSegs.length === 1; // "." (root) → top-level notebooks only
-  if (fileSegs.length !== dirSegs.length + 1) return false;
-  for (let i = 0; i < dirSegs.length; i++) {
-    if (fileSegs[i] !== dirSegs[i]) return false;
-  }
-  return true;
+/** First non-empty line of a cell's source, trimmed — context for a failure. */
+function sourcePreview(source: string, max = 120): string {
+  const line = source.split("\n").find((l) => l.trim()) ?? source;
+  const text = line.trim();
+  return text.length > max ? `${text.slice(0, max)}…` : text;
 }
+
+/**
+ * Concatenated textual view of a cell's outputs (streams + error traceback +
+ * `text/plain`), ANSI-stripped. Images are left out on purpose — the replay
+ * summary is text; inline images come from `jupyter_repl` / `jupyter_outputs`.
+ */
+function outputText(result: CellResult): string {
+  const chunks: string[] = [];
+  for (const output of result.outputs ?? []) {
+    if (output.outputType === "stream" && output.text) {
+      chunks.push(output.name === "stderr" ? `[stderr] ${output.text}` : output.text);
+    } else if (output.outputType === "error") {
+      const traceback = Array.isArray(output.traceback) ? output.traceback.join("\n") : "";
+      chunks.push(traceback || `${output.ename ?? "Error"}: ${output.evalue ?? ""}`);
+    } else if (output.dataJson) {
+      try {
+        const data = JSON.parse(output.dataJson) as Record<string, { value?: unknown }>;
+        const text = data["text/plain"]?.value;
+        if (typeof text === "string" && text.trim() && !/^<Figure[^>]*>/.test(text.trim())) {
+          chunks.push(text);
+        }
+      } catch {
+        /* a malformed bundle is not worth failing a replay over */
+      }
+    }
+  }
+  return stripAnsi(chunks.join(""));
+}
+
+/** Last few lines of a text block (prefixed when lines were dropped), for a compact summary. */
+function outputTail(text: string, maxLines = 20, maxChars = 2500): string {
+  const trimmed = text.replace(/\n+$/, "");
+  if (!trimmed) return "";
+  const lines = trimmed.split("\n");
+  const kept = lines.length > maxLines ? lines.slice(-maxLines) : lines;
+  let out = kept.join("\n");
+  if (lines.length > maxLines) out = `…(${lines.length - maxLines} earlier line(s) omitted)\n${out}`;
+  if (out.length > maxChars) out = `…${out.slice(-maxChars)}`;
+  return out;
+}
+
+/** One cell's replay outcome (see `replayFromStart`). */
+type ReplayCellReport = {
+  index: number;
+  cellId: string;
+  status: string;
+  success: boolean;
+  /** First line of the cell's source, for context. */
+  source: string;
+  /** Tail of the cell's textual output ("" when it produced none). */
+  output: string;
+  /** Failed cells only: the error message. */
+  error?: string;
+  /** Failed cells only: index of the first failure in the same contiguous run. */
+  upstream?: number;
+};
+
 
 // ── extension ───────────────────────────────────────────────────────────────
 
@@ -194,6 +236,17 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       description:
         "Continue an existing notebook (attach to its live kernel or resume its file). Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
       parameters: OPEN_NOTEBOOK_PARAMS,
+      async execute() {
+        throw new Error(CONFIG_HINT);
+      },
+    });
+
+    pi.registerTool({
+      name: "jupyter_outputs",
+      label: "Show Saved Notebook Outputs",
+      description:
+        "Read the outputs a notebook FILE already records (read-only). Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
+      parameters: OUTPUTS_PARAMS,
       async execute() {
         throw new Error(CONFIG_HINT);
       },
@@ -312,25 +365,42 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
    */
   async function replayFromStart(sess: Session): Promise<{
     replayed: number;
-    failed: { index: number; cellId: string; status: string; error: string }[];
+    failed: ReplayCellReport[];
+    cells: ReplayCellReport[];
   }> {
     const cells = sess.listCells();
-    const failed: { index: number; cellId: string; status: string; error: string }[] = [];
+    const reports: ReplayCellReport[] = [];
     let lastCount: number | null | undefined;
+    // Index of the FIRST failure in the current contiguous failing run. A cell
+    // that fails right after another failure is reported as a downstream
+    // cascade of it (the "one missing preamble → seven errors" case) instead of
+    // an independent bug; a successful cell ends the run, so a later failure
+    // stands on its own.
+    let runRoot: number | null = null;
     for (let i = 0; i < cells.length; i++) {
       const res = await sess.runCell(cells[i].source);
       lastCount = res.executionCount ?? lastCount;
-      if (res.success) continue;
       const err = res.outputs?.find((o) => o.outputType === "error");
-      failed.push({
+      const report: ReplayCellReport = {
         index: i,
         cellId: res.cellId,
         status: res.status,
-        error: err?.evalue ?? err?.ename ?? res.status,
-      });
+        success: res.success,
+        source: sourcePreview(cells[i].source),
+        output: outputTail(outputText(res)),
+        ...(res.success ? {} : { error: err?.evalue ?? err?.ename ?? res.status }),
+      };
+      if (res.success) {
+        runRoot = null;
+      } else if (runRoot !== null) {
+        report.upstream = runRoot;
+      } else {
+        runRoot = i;
+      }
+      reports.push(report);
     }
     if (lastCount != null) execCounts.set(sess.kernelName, lastCount + 1);
-    return { replayed: cells.length, failed };
+    return { replayed: cells.length, failed: reports.filter((r) => !r.success), cells: reports };
   }
 
   /** Kernel currently serving an OPEN notebook path (drives the In[n] counter). */
@@ -456,20 +526,32 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
   }
 
   /**
-   * Human + structured view of the notebooks the agent can CONTINUE that sit
-   * DIRECTLY inside ONE remote contents directory (`dir`, required — see
-   * `isDirectChild`; never recurses into subdirectories): registry entries
-   * (~/.pi-jupyter/notebooks.json) merged with the server's live
-   * /api/sessions rows — this is what a NEW agent consults FIRST to see
-   * whether a session is active. A live row means "attach — kernel still
-   * running, variables preserved"; a registry-only path means "file only —
-   * opening it starts a NEW kernel bound to the same path and re-runs its code
-   * cells from first to last, restoring the state".
+   * Human + structured view of the notebooks the agent can CONTINUE in one
+   * remote contents directory. The SERVER's contents listing (what actually
+   * exists) is merged with live /api/sessions rows and pi's opened-notebooks
+   * registry; a registry entry with no file and no kernel is a ghost and is
+   * dropped (see domain/listing.ts). `recursive`/`query` let the agent search a
+   * tree in one call instead of paging folder by folder.
    */
-  async function describeNotebooks(dir: string): Promise<{ text: string; details: Record<string, unknown> }> {
+  async function describeNotebooks(
+    dir: string,
+    opts: { recursive?: boolean; query?: string } = {},
+  ): Promise<{ text: string; details: Record<string, unknown> }> {
+    const recursive = opts.recursive ?? false;
+    const query = opts.query?.trim() || undefined;
     const server = new JupyterServer(config);
     const purposes = loadPurposes();
+    let serverNotebooks: ContentsEntry[] = [];
+    let serverListed = false;
+    let listError: string | undefined;
     let liveRows: Array<{ path: string; kernelName: string }> = [];
+    try {
+      const listing = await server.listDirectory(dir, { recursive });
+      serverNotebooks = listing.entries.filter((e) => e.type === "notebook");
+      serverListed = listing.exists;
+    } catch (err) {
+      listError = (err as Error).message;
+    }
     try {
       liveRows = (await server.listSessions())
         .filter((s) => s.type === "notebook" || s.path.endsWith(".ipynb"))
@@ -480,92 +562,77 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       try { server.dispose(); } catch { /* ignore */ }
     }
     const store = loadNotebooks();
-    // path → { kernel, live, source, localFile, updated, open }
-    const merged = new Map<
-      string,
-      {
-        kernel: string;
-        live: boolean;
-        source: "remote" | "local";
-        localFile?: string;
-        updated: string;
-        open: boolean;
-      }
-    >();
-    for (const live of liveRows) {
-      const prior = merged.get(live.path);
-      merged.set(live.path, {
-        kernel: live.kernelName || prior?.kernel || "?",
-        live: true,
-        source: prior?.source ?? "remote",
-        ...(prior?.localFile ? { localFile: prior.localFile } : {}),
-        updated: prior?.updated ?? "",
-        open: sessionsByPath.has(live.path),
-      });
-    }
-    for (const [path, rec] of Object.entries(store)) {
-      const prior = merged.get(path);
-      merged.set(path, {
-        kernel: prior?.kernel ?? rec.kernelName,
-        live: prior?.live ?? false,
-        source: rec.source,
-        ...(rec.localFile ? { localFile: rec.localFile } : {}),
-        updated: prior?.updated ?? rec.updated,
-        open: prior?.open ?? sessionsByPath.has(path),
-      });
-    }
-    // Keep rows open in THIS conversation that somehow are not above.
-    for (const path of sessionsByPath.keys()) {
-      if (!merged.has(path)) {
-        const sess = sessionsByPath.get(path)!;
-        merged.set(path, {
-          kernel: sess.kernelName,
-          live: true,
-          source: "remote",
-          updated: "",
-          open: true,
-        });
-      }
-    }
-    // Scope to one directory (direct children only) so the list stays small as
-    // more notebooks accumulate; subdirectories are never descended into.
-    const rows = [...merged.entries()]
-      .filter(([path]) => isDirectChild(path, dir))
-      .sort(([a], [b]) => a.localeCompare(b));
-    const liveShown = liveRows.filter((r) => isDirectChild(r.path, dir));
+    const { rows, stale } = mergeNotebookRows({
+      dir,
+      recursive,
+      ...(query ? { query } : {}),
+      serverNotebooks,
+      serverListed,
+      liveSessions: liveRows,
+      registry: store,
+      openPaths: [...sessionsByPath.keys()],
+    });
+    const liveShown = liveRows.filter((r) => rows.some((row) => row.path === r.path));
+    const scopeText = recursive
+      ? `"${dir}" and its subdirectories`
+      : `"${dir}" (direct children only)`;
+    const extraTools =
+      `jupyter_repl${config.enableAddDependencies ? " / jupyter_add_dependencies" : ""}${config.enableSaveNotebook ? " / jupyter_save_notebook" : ""}`;
     const lines: string[] = [
-      `Notebooks available to continue on the configured Jupyter Server (directly in "${dir}"):`,
-      `  Continue one with jupyter_open_notebook(path=…); then keep passing the same path as \`notebook\` to jupyter_repl${config.enableAddDependencies ? " / jupyter_add_dependencies" : ""}${config.enableSaveNotebook ? " / jupyter_save_notebook" : ""}.`,
+      `Notebooks on the configured Jupyter Server in ${scopeText}${query ? ` matching "${query}"` : ""}:`,
+      `  Read from the server's contents API (so files pi never opened are visible) and merged with live /api/sessions rows. Continue one with jupyter_open_notebook(path=…); then keep passing the same path as \`notebook\` to ${extraTools}.`,
       "",
     ];
+    if (listError) {
+      lines.push(
+        `  ! could not read the server's contents listing (${listError}) — showing pi's registry only, existence NOT verified.`,
+      );
+    } else if (!serverListed) {
+      lines.push(
+        `  ! the directory "${dir}" does not exist on the server — showing pi's registry only, existence NOT verified.`,
+      );
+    }
     if (rows.length === 0) {
-      if (merged.size === 0) {
+      if (query) {
+        lines.push(`  (nothing in ${scopeText} matches "${query}" — drop or widen \`query\`)`);
+      } else if (!recursive && (listError === undefined && serverListed)) {
         lines.push(
-          `  (none recorded yet — open a notebook under "${dir}" with jupyter_open_notebook to create the first session)`,
+          `  (no notebook sits directly in "${dir}" — set recursive=true to also search subdirectories${dir === "." ? "" : ', or pass dir="."'})`,
         );
       } else {
-        const hint = dir === "." ? "a folder name" : '"."';
         lines.push(
-          `  (no notebook sits directly in "${dir}" — the listing never recurses into subdirectories; try ${hint} to widen the scope)`,
+          `  (none — open a notebook with jupyter_open_notebook, or widen the scope${dir === "." ? "" : ' (dir=".")'})`,
         );
       }
     } else {
-      for (const [path, info] of rows) {
+      for (const info of rows) {
         const marks: string[] = [];
         if (info.live) marks.push("LIVE — open attaches, variables kept");
         else marks.push("file only — open starts a fresh kernel that re-runs its cells (state restored)");
         if (info.open) marks.push("open in this conversation");
         if (info.source === "local" && info.localFile) marks.push(`imported from ${info.localFile}`);
         const purpose = purposes[info.kernel];
-        lines.push(`  - ${path}  (kernel ${info.kernel})${purpose ? `  [purpose: ${purpose}]` : ""}`);
-        lines.push(`      ${marks.join(" | ")}${info.updated ? ` | last used ${info.updated.slice(0, 10)}` : ""}`);
+        lines.push(`  - ${info.path}  (kernel ${info.kernel})${purpose ? `  [purpose: ${purpose}]` : ""}`);
+        lines.push(
+          `      ${marks.join(" | ")}${info.updated ? ` | last used ${info.updated.slice(0, 10)}` : ""}`,
+        );
       }
+    }
+    if (stale.length) {
+      lines.push("");
+      lines.push(
+        `  (${stale.length} stale registry entr${stale.length === 1 ? "y" : "ies"} hidden — no such file on the server: ${stale.join(", ")})`,
+      );
     }
     return {
       text: lines.join("\n"),
       details: {
         dir,
-        notebooks: rows.map(([path, info]) => ({ path, ...info })),
+        recursive,
+        ...(query ? { query } : {}),
+        server_listed: serverListed,
+        notebooks: rows,
+        stale,
         live_paths: liveShown.map((r) => r.path),
       },
     };
@@ -577,14 +644,17 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_list_notebooks",
     label: "List Notebooks",
     description:
-      'List the notebooks on the remote Jupyter Server that sit DIRECTLY in the given remote contents `dir` (required) — the listing is scoped to one folder and NEVER recurses into subdirectories, so it stays small as more folders accumulate; pass "." for the server root. Shows which have a LIVE kernel (jupyter_open_notebook attaches, variables kept) and which are file-only (it starts a fresh kernel that re-runs their cells to restore state).',
+      'List the notebooks that exist on the remote Jupyter Server in the given remote contents `dir` (required; pass "." for the server root). The listing comes from the server\'s contents API — so notebooks pi has never opened are included — merged with live kernels and pi\'s registry; stale registry entries whose file is gone are dropped. By default only direct children of `dir` are shown; set recursive=true (optionally with query="…") to search subdirectories in one call. Each row says whether it has a LIVE kernel (jupyter_open_notebook attaches, variables kept) or is file-only (it starts a fresh kernel that re-runs the cells to restore state).',
     parameters: LIST_NOTEBOOKS_PARAMS,
     async execute(_toolCallId, params: ListNotebooksParams) {
       const dir = params.dir.trim();
       if (!dir) {
         throw new Error('[pi-jupyter] jupyter_list_notebooks needs a non-empty `dir` — a remote contents directory (e.g. "notes"); pass "." for the server root.');
       }
-      const { text, details } = await describeNotebooks(dir);
+      const { text, details } = await describeNotebooks(dir, {
+        recursive: params.recursive,
+        query: params.query,
+      });
       return { content: [{ type: "text", text }], details };
     },
   });
@@ -709,7 +779,10 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
             if (replay.failed.length === 0) {
               lines.push(`State restored: re-ran all ${replay.replayed} code cell(s) from first to last — every one succeeded.`);
             } else {
-              lines.push(`State restore is PARTIAL: re-ran ${replay.replayed} code cell(s) from first to last; ${replay.failed.length} FAILED (listed at the end, also in details.replay). Fix the failing cells and re-run them.`);
+              const roots = replay.failed.filter((f) => f.upstream === undefined).length;
+              lines.push(
+                `State restore is PARTIAL: re-ran ${replay.replayed} code cell(s) from first to last; ${replay.failed.length} failed${roots < replay.failed.length ? ` (${roots} root cause(s), the rest downstream cascades)` : ""}. Root causes, their output and the cascades are listed at the end and in details.replay.`,
+              );
             }
           }
         } else {
@@ -728,11 +801,36 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       } else {
         lines.push("No code cells yet.");
       }
-      if (replay?.failed.length) {
-        lines.push("");
-        for (const f of replay.failed) {
-          lines.push(`  ! cell [${f.index}] ${f.cellId} — ${f.status}: ${f.error}`);
+      if (replay) {
+        const withOutput = replay.cells.filter((c) => c.output);
+        if (withOutput.length) {
+          lines.push("");
+          lines.push(
+            "Replayed outputs (tail of each cell's stdout/text — the file has the rest):",
+          );
+          for (const c of withOutput) {
+            lines.push(`  [${c.index}] (${c.status})`);
+            for (const l of c.output.split("\n")) lines.push(`      ${l}`);
+          }
         }
+      }
+      const roots = replay?.failed.filter((f) => f.upstream === undefined) ?? [];
+      const cascades = replay?.failed.filter((f) => f.upstream !== undefined) ?? [];
+      if (roots.length) {
+        lines.push("");
+        lines.push(`Failures (${roots.length} root cause${roots.length === 1 ? "" : "s"}):`);
+        for (const f of roots) {
+          lines.push(`  ! [${f.index}] ${f.cellId} — ${f.status}: ${f.error}`);
+          if (f.source) lines.push(`      > ${f.source}`);
+          if (f.output) for (const l of f.output.split("\n")) lines.push(`      ${l}`);
+        }
+      }
+      if (cascades.length) {
+        lines.push(
+          `  ~ ${cascades.length} more cell(s) failed immediately after a failure and are reported as DOWNSTREAM CASCADES of their run's first failure (` +
+            cascades.map((f) => `[${f.index}]←[${f.upstream}]`).join(", ") +
+            ") — fix the root cell(s) first, then re-open to replay.",
+        );
       }
       return {
         content: [{ type: "text", text: lines.join("\n") }],
@@ -743,8 +841,81 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
           mode: modeText,
           cell_count: cells.length,
           cells,
-          ...(replay ? { replay: { replayed: replay.replayed, failed: replay.failed } } : {}),
+          ...(replay ? { replay: { replayed: replay.replayed, failed: replay.failed, cells: replay.cells } } : {}),
         },
+      };
+    },
+  });
+
+  // ── jupyter_outputs ───────────────────────────────────────────────────────
+
+  pi.registerTool<typeof OUTPUTS_PARAMS, Record<string, unknown>>({
+    name: "jupyter_outputs",
+    label: "Show Saved Notebook Outputs",
+    description:
+      "Read the outputs a notebook FILE already records — READ-ONLY: no kernel is started and no code runs. Use it when a replay/open summary is not enough (e.g. to re-read a table or a p-value already in the file), instead of parsing the .ipynb by hand. Optional `cell_id` narrows to one code cell; images are returned inline.",
+    parameters: OUTPUTS_PARAMS,
+    async execute(_toolCallId, params: OutputsParams) {
+      const path = normalizeContentsPath(params.path);
+      const server = new JupyterServer(config);
+      let model: Record<string, unknown> | null;
+      try {
+        model = await server.readNotebook(path);
+      } catch (err) {
+        throw new Error(`[pi-jupyter] could not read ${path}: ${(err as Error).message}`);
+      } finally {
+        try { server.dispose(); } catch { /* ignore */ }
+      }
+      if (!model) {
+        throw new Error(
+          `[pi-jupyter] no notebook file at "${path}" (or it is not an nbformat notebook).`,
+        );
+      }
+      const parsed = parseNotebook(model);
+      const codeCells = parsed.slots.filter(
+        (s): s is Extract<(typeof parsed.slots)[number], { kind: "code" }> => s.kind === "code",
+      );
+      const wanted = params.cell_id?.trim();
+      const selected = wanted ? codeCells.filter((c) => c.cellId === wanted) : codeCells;
+      if (wanted && selected.length === 0) {
+        throw new Error(`[pi-jupyter] ${path} has no code cell with id "${wanted}".`);
+      }
+      const content: ReturnType<typeof formatResult>["content"] = [];
+      const summaries: Array<Record<string, unknown>> = [];
+      selected.forEach((cell, index) => {
+        const { content: cellContent, isError } = formatResult(cell.result);
+        const header =
+          `[${index}] ${cell.cellId} (exec ${cell.result.executionCount ?? "-"})${isError ? " — ERROR" : ""}: ` +
+          sourcePreview(cell.source);
+        const [first, ...rest] = cellContent;
+        if (first && first.type === "text") {
+          // formatResult prefixes its own "cell <id> [n] status" header — drop it,
+          // we just rendered a richer one.
+          const body = first.text.replace(/^cell \S+ \[[^\]]*\] \S*\n?/, "");
+          content.push({ type: "text", text: body ? `${header}\n${body}` : header });
+          content.push(...rest);
+        } else {
+          content.push({ type: "text", text: header });
+          content.push(...cellContent);
+        }
+        summaries.push({
+          index,
+          cell_id: cell.cellId,
+          execution_count: cell.result.executionCount ?? null,
+          is_error: isError,
+          source: sourcePreview(cell.source, 200),
+          output: outputTail(outputText(cell.result), 50, 4000),
+        });
+      });
+      if (content.length === 0) {
+        content.push({
+          type: "text",
+          text: `Notebook ${path} has no code cells${wanted ? ` matching id "${wanted}"` : ""}.`,
+        });
+      }
+      return {
+        content,
+        details: { path, cell_count: codeCells.length, shown: selected.length, cells: summaries },
       };
     },
   });
@@ -803,7 +974,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_repl",
     label: "Jupyter REPL",
     description:
-      "Execute code in a notebook's persistent kernel on the remote Jupyter Server. `notebook` (required) is the remote contents path of the notebook to run in — pass the path you opened with jupyter_open_notebook to REUSE that session (a not-yet-open notebook is opened the same way first). Variables/imports persist across calls in that notebook's kernel. The last expression is the result; use print()/display() for intermediate output; images are returned inline.",
+      "Execute code in a notebook's persistent kernel on the remote Jupyter Server. `notebook` (required) is the remote contents path of the notebook to run in — pass the path you opened with jupyter_open_notebook to REUSE that session (a not-yet-open notebook is opened the same way first). Variables/imports persist across calls in that notebook's kernel. SCRATCH by default (`persist=false`): the code runs on the kernel and its output is returned, but the notebook document is NOT changed — exploratory/probe code never pollutes the saved .ipynb. Pass `persist=true` for real work that should be kept (an existing same-source cell is re-run in place, otherwise a new cell is appended, and the remote auto-save picks it up). The last expression is the result; use print()/display() for intermediate output; images are returned inline.",
     promptSnippet:
       "jupyter_repl: run code on a remote Jupyter notebook kernel — pass the notebook path opened with jupyter_open_notebook.",
     promptGuidelines: [
@@ -811,6 +982,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       `Pass the same \`notebook\` path to jupyter_repl${config.enableAddDependencies ? " / jupyter_add_dependencies" : ""}${config.enableSaveNotebook ? " / jupyter_save_notebook" : ""} to REUSE the session. Opening a previously-closed notebook starts a new kernel bound to its file and re-runs the code cells from first to last (state restored); opening a LIVE one attaches with variables kept.`,
       `jupyter_repl has no \`kernel\` or \`dependencies\` parameter — the kernel was fixed when the notebook was opened (live kernel / recorded kernelspec / the \`kernel\` param of jupyter_open_notebook / config fallback).${config.enableAddDependencies ? " Install packages with jupyter_add_dependencies." : ""}`,
       "The last expression is the result; use print()/display() for intermediate output. Images (matplotlib, PIL) come back inline.",
+      "jupyter_repl is SCRATCH by default (persist=false): the run's output comes back but it is not written to the notebook. Use it freely for probes/experiments. Pass persist=true only for real work you want recorded; use jupyter_outputs(path) to re-read outputs already saved in a .ipynb without running anything.",
     ],
     parameters: JUPYTER_PARAMS,
 
@@ -923,6 +1095,9 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       const timeoutSecs = Math.max(1, params.timeout_secs ?? 120);
       const result = await sess.runCell(params.code, {
         timeoutMs: Math.round(timeoutSecs * 1000),
+        // Scratch by default: the agent must opt in with persist=true to write
+        // the run into the notebook document (append or in-place re-run).
+        persist: params.persist ?? false,
         onUpdate: (progress) => {
           const { content, isError } = formatResult(progress);
           onUpdate?.({
@@ -952,8 +1127,9 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
           status: result.status,
           execution_count: result.executionCount,
           is_error: isError,
+          persist: params.persist ?? false,
           runtime: await sess.getRuntimeStatus().catch(() => undefined),
-          ...(replay ? { replay: { replayed: replay.replayed, failed: replay.failed } } : {}),
+          ...(replay ? { replay: { replayed: replay.replayed, failed: replay.failed, cells: replay.cells } } : {}),
         },
       };
     },

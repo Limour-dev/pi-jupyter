@@ -15,6 +15,7 @@
 import { KernelManager, ServerConnection, SessionManager } from "@jupyterlab/services";
 import type { Session } from "@jupyterlab/services";
 import { createRequire } from "node:module";
+import type { ContentsEntry, DirectoryListing } from "../domain/types";
 import type { ShimConfig } from "../config";
 import { JupyterKernel } from "./kernel";
 import type {
@@ -175,6 +176,63 @@ export class JupyterServer implements ServerPort {
     await mgr.shutdown(model.id);
   }
 
+  /**
+   * List a contents directory (see ServerPort.listDirectory). A 404 on the
+   * requested directory itself is reported as `exists:false`, not thrown — the
+   * caller can then say "that folder does not exist" instead of silently
+   * showing nothing. `recursive` walks subdirectories (depth/entry capped) so
+   * `jupyter_list_notebooks` can find a notebook in one call instead of the
+   * agent poking four directories by hand.
+   */
+  async listDirectory(dir: string, opts?: { recursive?: boolean }): Promise<DirectoryListing> {
+    const entries: ContentsEntry[] = [];
+    let exists = true;
+    const walk = async (rel: string, depth: number): Promise<void> => {
+      const url =
+        `${this.settings.baseUrl}api/contents` +
+        (rel ? `/${encodeContentsPath(rel)}` : "") +
+        "?content=1";
+      const res = await ServerConnection.makeRequest(url, { method: "GET" }, this.settings);
+      if (res.status === 404) {
+        if (depth === 0) exists = false; // the requested dir is gone; a missing SUBdir is skipped
+        return;
+      }
+      if (!res.ok) {
+        throw new Error(
+          `[pi-jupyter] could not list "${rel || "."}": HTTP ${res.status} ${res.statusText}`,
+        );
+      }
+      const body = (await res.json()) as { type?: string; content?: unknown } | null;
+      const content = Array.isArray(body?.content) ? (body as { content: unknown[] }).content : [];
+      const level: ContentsEntry[] = [];
+      for (const raw of content) {
+        if (!raw || typeof raw !== "object") continue;
+        const e = raw as Record<string, unknown>;
+        const path = typeof e.path === "string" ? e.path : "";
+        if (!path) continue;
+        level.push({
+          name:
+            typeof e.name === "string" && e.name
+              ? e.name
+              : (path.split("/").pop() ?? path),
+          path,
+          type: typeof e.type === "string" ? e.type : "unknown",
+          ...(typeof e.last_modified === "string" ? { lastModified: e.last_modified } : {}),
+          ...(typeof e.size === "number" ? { size: e.size } : {}),
+        });
+      }
+      entries.push(...level);
+      if (!opts?.recursive || depth >= MAX_LIST_DEPTH || entries.length >= MAX_LIST_ENTRIES) return;
+      for (const entry of level) {
+        if (entry.type !== "directory") continue;
+        await walk(entry.path, depth + 1);
+        if (entries.length >= MAX_LIST_ENTRIES) return;
+      }
+    };
+    await walk(normalizeContentsDir(dir), 0);
+    return { exists, entries };
+  }
+
   async readNotebook(contentsPath: string): Promise<Record<string, unknown> | null> {
     const url = `${this.settings.baseUrl}api/contents/${encodeContentsPath(contentsPath)}`;
     const res = await ServerConnection.makeRequest(url, { method: "GET" }, this.settings);
@@ -279,6 +337,25 @@ export class JupyterServer implements ServerPort {
     try { this.sessions?.dispose(); } catch { /* ignore */ }
     this.kernels.dispose();
   }
+}
+
+/** Recursion guard for recursive directory listings. */
+const MAX_LIST_DEPTH = 12;
+/** Entry-count cap for recursive directory listings (keeps the tool answer small). */
+const MAX_LIST_ENTRIES = 5000;
+
+/**
+ * Normalize a directory for the contents API: "" / "." / "./notes/" all mean
+ * the server root or "notes". Keeps the "/"-separated coordinates the API uses.
+ */
+export function normalizeContentsDir(dir: string): string {
+  const rel = dir
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^(?:\.\/)+/, "")
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "");
+  return rel === "." ? "" : rel;
 }
 
 /**

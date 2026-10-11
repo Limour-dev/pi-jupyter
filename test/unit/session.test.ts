@@ -65,6 +65,7 @@ function makeServerPort(kernel: KernelPort): ServerPort & {
   startKernel: ReturnType<typeof vi.fn>;
   findLiveSession: ReturnType<typeof vi.fn>;
   listSessions: ReturnType<typeof vi.fn>;
+  listDirectory: ReturnType<typeof vi.fn>;
   connectToSession: ReturnType<typeof vi.fn>;
   readNotebook: ReturnType<typeof vi.fn>;
   uploadNotebook: ReturnType<typeof vi.fn>;
@@ -76,6 +77,7 @@ function makeServerPort(kernel: KernelPort): ServerPort & {
     startKernel: vi.fn().mockResolvedValue(kernel),
     findLiveSession: vi.fn().mockResolvedValue(null),
     listSessions: vi.fn().mockResolvedValue([]),
+    listDirectory: vi.fn().mockResolvedValue({ exists: true, entries: [] }),
     connectToSession: vi.fn().mockResolvedValue(kernel),
     readNotebook: vi.fn().mockResolvedValue(null),
     uploadNotebook: vi.fn().mockResolvedValue(undefined),
@@ -992,6 +994,43 @@ describe("RemoteSession — resume (continue an existing notebook path)", () => 
     await s.flushAutoSave();
     const model = server.uploadNotebook.mock.calls.at(-1)?.[1] as { cells: any[] };
     expect(model.cells.filter((c: any) => c.cell_type === "code")).toHaveLength(2);
+  });
+
+  it("persist=false is SCRATCH: the run is returned but the document is untouched", async () => {
+    kernel.execute.mockImplementation(async (code: string) => {
+      if (code.includes('"missing"')) {
+        return { outputs: [], status: "ok" as const, executionCount: undefined };
+      }
+      return {
+        outputs: [{ outputType: "stream", name: "stdout", text: "probe\n" }],
+        status: "ok" as const,
+        executionCount: 7,
+      };
+    });
+    const s = new RemoteSession(server, CONFIG, { notebookId: "nb-scratch" });
+    await s.initialize();
+    const r = await s.runCell("print('probe')", { persist: false });
+    expect(r.status).toBe("done");
+    expect(r.outputs?.[0]).toMatchObject({ outputType: "stream", text: "probe\n" });
+    // Nothing landed in the live document, and no autosave was scheduled.
+    expect(s.listCells()).toHaveLength(0);
+    await s.flushAutoSave();
+    expect(server.uploadNotebook).not.toHaveBeenCalled();
+    // Real work opted in with persist=true still appends a cell.
+    await s.runCell("x = 1", { persist: true });
+    expect(s.listCells()).toHaveLength(1);
+  });
+
+  it("persist=false against an existing cell leaves it restored (scratch never rewrites it)", async () => {
+    server.readNotebook.mockResolvedValue(FILE_NB());
+    const s = new RemoteSession(server, CONFIG, { contentsPath: "notes/pi.ipynb" });
+    await s.resume("notes/pi.ipynb");
+    await s.runCell("import numpy as np", { persist: false });
+    expect(s.listCells()[0].restored).toBe(true);
+    // persist=true (recording) re-runs it in place, like JupyterLab.
+    const kept = await s.runCell("import numpy as np", { persist: true });
+    expect(kept.cellId).toBe("cell-a");
+    expect(s.listCells()[0].restored).toBe(false);
   });
 
   it("detach() keeps the kernel running (no shutdown) and disposes the client", async () => {

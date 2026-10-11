@@ -57,6 +57,36 @@ export type CellResult = {
 export type RunCellOpts = {
   timeoutMs?: number;
   onUpdate?: (progress: CellResult) => void;
+  /**
+   * Scratch switch: when false the execution runs on the kernel but its result
+   * is NOT written into the notebook document — no append when the source
+   * matches no cell, no in-place update when it does. The result is still
+   * returned to the caller, so exploratory code never pollutes the saved file.
+   * Default true (record it); the `jupyter_repl` tool passes the agent's
+   * explicit `persist` choice, whose default is false (scratch).
+   */
+  persist?: boolean;
+};
+
+// ── Remote contents ─────────────────────────────────────────────────────────
+
+/** One entry of a remote contents directory listing (GET /api/contents/<dir>). */
+export type ContentsEntry = {
+  name: string;
+  /** Contents path relative to the server root, e.g. "notes/pi.ipynb". */
+  path: string;
+  /** Content type as reported by the server: "notebook" | "file" | "directory" | "unknown". */
+  type: string;
+  /** ISO timestamp reported by the server, when present. */
+  lastModified?: string;
+  size?: number;
+};
+
+/** Result of listing a remote contents directory. */
+export type DirectoryListing = {
+  /** False when the directory itself does not exist on the server (HTTP 404). */
+  exists: boolean;
+  entries: ContentsEntry[];
 };
 
 // ── Observable ──────────────────────────────────────────────────────────────

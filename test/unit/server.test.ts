@@ -3,7 +3,7 @@
  * (FR-2 / NFR-3). Offline — no Jupyter Server involved.
  */
 import { describe, expect, it } from "vitest";
-import { encodeContentsPath } from "../../src/kernel/server";
+import { encodeContentsPath, normalizeContentsDir } from "../../src/kernel/server";
 
 describe("encodeContentsPath", () => {
   it("keeps a plain default file name intact", () => {
@@ -24,5 +24,19 @@ describe("encodeContentsPath", () => {
   it("percent-encodes non-ASCII and reserved characters per segment", () => {
     expect(encodeContentsPath("笔记/pi.ipynb")).toBe("%E7%AC%94%E8%AE%B0/pi.ipynb");
     expect(encodeContentsPath("a&b/c#d.ipynb")).toBe("a%26b/c%23d.ipynb");
+  });
+});
+
+describe("normalizeContentsDir", () => {
+  it("collapses the root spellings to the empty path", () => {
+    expect(normalizeContentsDir(".")).toBe("");
+    expect(normalizeContentsDir("")).toBe("");
+    expect(normalizeContentsDir("/")).toBe("");
+    expect(normalizeContentsDir("./")).toBe("");
+  });
+
+  it("strips ./ and trailing slashes but keeps hierarchy", () => {
+    expect(normalizeContentsDir("./notes/")).toBe("notes");
+    expect(normalizeContentsDir("/notes/sub/")).toBe("notes/sub");
   });
 });

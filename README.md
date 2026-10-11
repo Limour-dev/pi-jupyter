@@ -11,15 +11,13 @@ sessions are gone (`jupyter_repl` requires `notebook` and no longer takes `kerne
 
 ## Features
 
-- `jupyter_list_notebooks(dir=…)` — FIRST step, **scoped to one remote contents directory**: shows the notebooks that are ACTIVE (open this
-  conversation / LIVE kernel on the server) or resumable from a saved file, taking only **direct children of `dir`** — it never recurses into
-  subdirectories, so the list stays small as more folders accumulate (pass `"."` for the server root)
+- `jupyter_list_notebooks(dir=…)` — FIRST step: shows the notebooks that **actually exist** on the server in `dir`, read from the contents API (so a `.ipynb` pi never opened is visible), merged with **LIVE** kernels and pi's opened-notebooks registry. Registry entries whose file no longer exists are dropped as *stale* (no more ghost paths). Scope is one level by default (direct children of `dir`; pass `"."` for the server root) — set `recursive=true`, optionally with `query="name"`, to search subdirectories in one call.
 - `jupyter_open_notebook` — start an ACTIVE session on a notebook: attaches to its
   still-running kernel when one is bound to the path (no new kernel, variables kept), or
   starts a NEW kernel bound to the same path and **re-runs the file's code cells from
   first to last** so the in-memory state is restored (previously-closed session)
-- `jupyter_repl` — execute code in the active notebook session (`notebook` is required and
-  the call REUSES that session); variables/imports persist between calls
+- `jupyter_repl` — execute code in the active notebook session (`notebook` required; the call REUSES that session); variables/imports persist between calls. **SCRATCH by default**: the run's output comes back but the notebook document is NOT changed, so probes/experiments never pollute the file; pass `persist=true` to record real work (an existing same-source cell re-runs in place, otherwise a new cell is appended)
+- `jupyter_outputs` — read the outputs a notebook FILE already records, **read-only** (no kernel, nothing executed); re-read a saved table/p-value without parsing the `.ipynb` by hand
 - `jupyter_add_dependencies` — hot-install packages into a notebook's kernel (`%pip` for
   Python, `install.packages` for R), no restart — **OPT-IN tool** (off by default, see *Tool gates* below)
 - `jupyter_list_kernels` — discover the kernels (python3, ir, …) on the server; shows each
@@ -70,7 +68,7 @@ prompted to install packages or write `.ipynb` files, and the `jupyter_repl` /
 There are **no anonymous kernel sessions**: code always runs on the kernel of a notebook
 that was opened by `jupyter_open_notebook`. A NEW agent follows this flow:
 
-1. `jupyter_list_notebooks(dir=…)` — detect whether a session is already active in the current remote folder (`dir` is required; only notebooks sitting directly in it are shown — no recursion).
+1. `jupyter_list_notebooks(dir=…)` — see what is available in the current remote folder (`dir` is required; the list is read from the server's contents API, so unopened notebooks show up, and stale registry entries are dropped). Only direct children are shown unless you pass `recursive=true`/`query="…"`.
 2. No active session, or switching to another notebook → `jupyter_open_notebook`
    (`path` from the list, or `local_file` to import). If you do not know which kernels
    the server offers, call `jupyter_list_kernels` first.
@@ -78,7 +76,8 @@ that was opened by `jupyter_open_notebook`. A NEW agent follows this flow:
    NEW kernel bound to the same path and **executes its cells from the first to the last**
    automatically — that is what rebuilds the in-memory state.
 4. Then run code with `jupyter_repl(notebook=<same path>, code=…)`. When a session is
-   already active and you are continuing it, `jupyter_repl` simply REUSES it.
+   already active and you are continuing it, `jupyter_repl` simply REUSES it. Runs are
+   scratch by default; pass `persist=true` to record a cell.
 
 ```text
 you:   "continue my notes/pi.ipynb"
@@ -133,7 +132,7 @@ later `jupyter_list_kernels` shows the purpose.
 A NEW conversation can pick up where an earlier one left off — no re-running everything
 from scratch, and when the kernel is still alive, **no new kernel at all**. What pi has
 opened is remembered in `~/.pi-jupyter/notebooks.json` (contents path → kernel), and
-`jupyter_list_notebooks(dir=…)` merges that registry with the server's live `/api/sessions` rows and shows only notebooks sitting **directly in `dir`** (never recursing into subdirectories).
+`jupyter_list_notebooks(dir=…)` merges that registry with the server's live `/api/sessions` rows **and the server's contents listing** — the listing is what makes a notebook pi never opened visible, and what lets a registry entry whose file is gone be dropped as stale. Only notebooks sitting **directly in `dir`** are shown by default (`recursive=true` includes subdirectories).
 
 - **The notebook is a remote contents path** (e.g. `notes/pi.ipynb`): the same path is the
   `/api/sessions` bind row and the auto-save target, so the file you open in JupyterLab,
@@ -148,7 +147,8 @@ opened is remembered in `~/.pi-jupyter/notebooks.json` (contents path → kernel
   **from first to last automatically**, so the in-memory state is rebuilt before any
   `jupyter_repl` call. Re-running identical source executes IN PLACE (same cell id,
   outputs replaced), so the notebook keeps one copy per logical cell — like JupyterLab.
-  The open result lists each cell and any failures.
+  The open result shows each cell's output tail and any failures; failures that occur
+  immediately after another failure are folded into their root cause as downstream cascades.
 - **Local file → import.** `jupyter_open_notebook(local_file="./x.ipynb")` uploads the file
   to the server (under its file name) and continues it there (imported cells are re-run
   the same way).
@@ -158,8 +158,10 @@ opened is remembered in `~/.pi-jupyter/notebooks.json` (contents path → kernel
 
 ## Remote auto-save
 
-After every `jupyter_repl` cell (success, error, or timeout alike) the session snapshot is
-uploaded to the remote Jupyter Server via the Contents API (`PUT /api/contents/<path>`).
+After every RECORDED `jupyter_repl` cell (success, error, or timeout alike) the session
+snapshot is uploaded to the remote Jupyter Server via the Contents API
+(`PUT /api/contents/<path>`). A **scratch** run (`persist=false`, the default) never
+touches the document, so it is not auto-saved.
 The upload is a by-pass: it never blocks or changes the tool result, rapid cells are
 coalesced (an older snapshot can never overwrite a newer one), and failures only produce a
 warning.
@@ -251,7 +253,7 @@ npm run build                  # tsup → dist/
 ## Layout
 
 ```
-src/domain/      pure core, zero external deps  (types, output, notebook, deps, bootstrap, subject)
+src/domain/      pure core, zero external deps  (types, output, notebook, listing, deps, bootstrap, subject)
 src/kernel/      @jupyterlab/services adapters  (port, server, kernel, convert)
 src/session.ts   RemoteSession behind KernelPort
 src/config.ts    server connection only (url/token); the kernel is fixed when a notebook is opened

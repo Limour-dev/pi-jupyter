@@ -59,7 +59,7 @@ dual-channel execution protocol, the two JSON stores, the offline test suite).
                 │ uses
 ┌───────────────▼───────────────────────────────────────────────────────┐
 │  src/domain/            pure core (ZERO external dependencies)        │
-│    types.ts  output.ts  notebook.ts  deps.ts  bootstrap.ts  subject.ts│
+│    types.ts  output.ts  notebook.ts  listing.ts  deps.ts  bootstrap.ts  subject.ts│
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -183,17 +183,19 @@ document order) let the tool layer tell the agent exactly what is there.
 
 ### The agent flow (encoded in the tool prompts)
 
-1. `jupyter_list_notebooks(dir=…)` — detect whether a session is active in the given remote contents directory (open this
-   conversation / LIVE kernel on the server) and what else is resumable. The `dir` parameter is required and the listing
-   shows only notebooks sitting DIRECTLY in it — never recursing into subdirectories, so it stays small as more folders
-   accumulate (pass `"."` for the server root).
+1. `jupyter_list_notebooks(dir=…)` — see what exists in the given remote contents directory (open in this
+   conversation / LIVE kernel on the server / a file pi never opened) and what is resumable. `dir` is required;
+   the listing comes from the server's contents API merged with live sessions and the registry (ghosts dropped),
+   shows only DIRECT children unless `recursive=true`, and accepts `query` for a substring search. Pass `"."` for
+   the server root.
 2. No active session, or switching to another notebook → `jupyter_open_notebook`
    (`path`, or `local_file` to import). `jupyter_list_kernels` first when the
    kernels are unknown.
 3. If the open result says `started`, the previously-closed session was replayed
    from first to last (state restored, failures listed).
 4. Continuing an active session → `jupyter_repl(notebook=<same path>, code=…)`
-   reuses the session.
+   reuses the session. Runs are scratch unless `persist=true`; `jupyter_outputs(path)` shows the outputs already
+   stored in the file.
 
 ### Re-running identical code happens IN PLACE
 
@@ -206,6 +208,32 @@ the same code never duplicates the cell, so the notebook keeps one copy per
 logical cell, like JupyterLab. Only code that matches no existing cell appends a
 new code slot. Replaying a file with a fresh kernel therefore does not
 duplicate the document — each logical cell executes once in place.
+
+### Scratch runs, saved outputs, and replay diagnostics (v3.1)
+
+Four agent-experience fixes sit on top of the v3 model; all are pi-side and
+touching no data:
+
+- **`jupyter_repl` is scratch by default.** `RunCellOpts.persist` (default `true`
+  in the library, `false` from the tool) decides whether a run is written into the
+  document: `persist: false` executes on the kernel and returns the result, but
+  appends nothing, updates no existing cell, and schedules no auto-save — so a
+  probe/experiment can never pollute the saved `.ipynb`. `persist: true` keeps the
+  JupyterLab-like behavior (in-place re-run or append) and triggers the remote
+  auto-save. `replayFromStart` records (its default), so a resumed file keeps its
+  cell ids and execution counts.
+- **`jupyter_outputs(path)` is a read-only escape hatch.** It reads the `.ipynb`
+  via `ServerPort.readNotebook`, parses it with `parseNotebook`, and reuses
+  `formatResult`, so the agent can re-read a stored table/p-value (text + inline
+  images) without a kernel and without hand-parsing JSON.
+- **Replay reports outputs and folds cascades.** `replayFromStart` collects a text
+  tail (`outputText`/`outputTail`) per cell and shows it in the open result; a
+  failure that immediately follows another failure is tagged as a downstream
+  cascade of that run's first failure (`upstream`) instead of being reported as an
+  independent bug — the "one missing preamble → seven errors" noise collapses to
+  one root cause plus a cascade count.
+- **Listings are server-truth.** See *Discovery* below: `mergeNotebookRows` makes
+  unopened files visible and drops registry ghosts.
 
 ### Kernel lifecycle: keep-alive for notebooks (default)
 
@@ -230,8 +258,14 @@ connections but leaves the server-side kernel/session row running.
 `{kernelName, updated, source, localFile?}`), written whenever a session opens
 (atomic tmp+rename, like `purposes.json`). `jupyter_list_notebooks(dir=…)`
 merges it with the server's LIVE `/api/sessions` rows (`ServerPort.listSessions`)
-and annotates every candidate that sits DIRECTLY in `dir` (its required
-parameter) — **LIVE kernel → attach, variables kept** vs
+**and the server's contents listing** (`ServerPort.listDirectory`). The listing is
+what makes a notebook pi NEVER opened visible, and what proves a registry entry
+whose file is gone is a ghost — those are dropped as `stale` instead of being
+shown (`domain/listing.ts` `mergeNotebookRows`, pure and unit-tested). `dir` is
+required; only DIRECT children are listed unless `recursive=true`, and `query`
+does a case-insensitive substring search, so the agent can find a notebook in one
+call instead of paging folders. Every row is annotated — **LIVE kernel → attach,
+variables kept** vs
 **file only → open starts a new kernel and re-runs its cells (state restored)**.
 A brand-new conversation — empty session map, no in-memory state — therefore
 still knows what it can continue. `jupyter_open_notebook` accepts a remote path
