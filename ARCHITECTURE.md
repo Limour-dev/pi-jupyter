@@ -197,6 +197,17 @@ document order) let the tool layer tell the agent exactly what is there.
    reuses the session. Runs are scratch unless `persist=true`; `jupyter_outputs(path)` shows the outputs already
    stored in the file.
 
+The flow is deliberately **single-notebook**: `jupyter_open_notebook` is called
+once to start/continue a session, and every later step reuses it. It is NOT an
+open → run → shutdown → open loop — a shutdown kills the live kernel (and every
+variable/import it held) and the next open merely replays the file, the opposite
+of continuity. Because a scratch run (`persist=false`) is intentionally not
+written to the document, the way to record a cell is `persist=true`, not a
+restart. The tools' `promptGuidelines` also forbid the common workaround of
+writing a throwaway `.py`/`.R` source file and converting/importing it to
+`.ipynb`: the notebook is the record, so code goes straight through
+`jupyter_repl`.
+
 ### Re-running identical code happens IN PLACE
 
 `runCell` re-executes IN PLACE whenever the document already holds a code cell

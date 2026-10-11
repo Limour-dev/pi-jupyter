@@ -77,7 +77,8 @@ that was opened by `jupyter_open_notebook`. A NEW agent follows this flow:
    automatically — that is what rebuilds the in-memory state.
 4. Then run code with `jupyter_repl(notebook=<same path>, code=…)`. When a session is
    already active and you are continuing it, `jupyter_repl` simply REUSES it. Runs are
-   scratch by default; pass `persist=true` to record a cell.
+   scratch by default; pass `persist=true` to record a cell. Keep this SAME notebook
+   open for the whole task — never shut it down and re-open it to refresh state.
 
 ```text
 you:   "continue my notes/pi.ipynb"
@@ -88,6 +89,33 @@ agent: jupyter_open_notebook(path="notes/pi.ipynb")   # 2. continue / switch
        → Attached to the LIVE kernel — variables intact (no re-run)
 agent: jupyter_repl(notebook="notes/pi.ipynb", code="...")   # 4. reuse the session
 ```
+
+### Stay in ONE notebook — do not open/close in a loop
+
+Work in a notebook the way a person works at a REPL: **open it once and keep
+using it**. `jupyter_open_notebook` is a *start/continue* action, not something
+to repeat around every run.
+
+- Re-opening a path that is already open in this conversation is a no-op — it
+  does not "refresh" the document and it does not make new runs appear.
+- `jupyter_shutdown_notebook` + `jupyter_open_notebook` is **not** a refresh:
+  shutdown kills the live kernel and every variable/import it held, and the
+  re-open starts a fresh kernel that replays the file. That loses the very state
+  the notebook exists to keep.
+- A SCRATCH run (`persist=false`, the default) is deliberately absent from the
+  `.ipynb`. To put a run **into** the notebook, pass `persist=true` — that is
+  the intended way to record a cell, not a restart. Re-reading already-saved
+  output is `jupyter_outputs(path)`.
+
+### Do not route code through a `.py` / `.R` file
+
+The notebook itself is the record. Do **not** write a throwaway source file
+(`.py`, `.R`, `.jl`, …) and convert/import it to `.ipynb` just to execute it,
+and do not create a fresh notebook per experiment. If you do not know what
+exists, call `jupyter_list_notebooks(dir=…)`; pick the one notebook that fits
+the task (or open a single new one) and keep passing its `path` to
+`jupyter_repl`. Scratch code that should not be saved still goes through
+`jupyter_repl` (`persist=false`), so nothing extra is written to disk.
 
 ### Which kernel runs the code? Decided when the notebook is opened.
 

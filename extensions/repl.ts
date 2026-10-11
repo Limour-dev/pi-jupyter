@@ -11,6 +11,20 @@
  *   src/domain/             pure logic
  * Notebook-first execution — how a NEW agent session should drive this
  * extension:
+ *
+ *   STAY IN ONE NOTEBOOK — drive it like a human at a REPL. Pick one notebook,
+ *   open it ONCE, then keep calling `jupyter_repl(notebook=<same path>, …)` for
+ *   every step; the kernel's variables/imports persist across those calls.
+ *   Do NOT loop open → run → shutdown → open, and do NOT open a second path
+ *   (or a fresh notebook) to "see" what a run produced: a closed kernel loses
+ *   all live state and re-opening only replays the file. A SCRATCH run
+ *   (persist=false, the default) is intentionally absent from the .ipynb, so
+ *   the way to KEEP a cell is `persist=true` — not a restart. Likewise never
+ *   write throwaway `.py`/`.R` (or other) source files and convert/import them
+ *   as `.ipynb` just to execute; put the code straight into `jupyter_repl` on
+ *   the notebook you already have open (or `jupyter_open_notebook` a real
+ *   notebook first). Use `jupyter_outputs(path)` to re-read saved outputs.
+ *
  *   - `jupyter_list_notebooks(dir=…)` first: it shows the notebooks that EXIST
  *     on the server in ONE remote contents directory (required `dir`; read from
  *     the contents API, so files pi never opened are visible) merged with LIVE
@@ -706,8 +720,12 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_open_notebook",
     label: "Open / Continue Notebook",
     description:
-      "Open/continue a notebook session on the remote Jupyter Server. A LIVE kernel bound to the path is ATTACHED (no new kernel — variables kept); otherwise a NEW kernel is started on the same path and the file's code cells are re-run from first to last, restoring the state (a path with no file starts empty). Give `path` (a remote contents path, as listed by jupyter_list_notebooks) or `local_file` (import a local .ipynb). Pass `kernel` (a kernelspec name) when there is no live kernel and the file records none — otherwise the file's kernelspec, then the config fallback, apply.",
+      "Open/continue a notebook session on the remote Jupyter Server. A LIVE kernel bound to the path is ATTACHED (no new kernel — variables kept); otherwise a NEW kernel is started on the same path and the file's code cells are re-run from first to last, restoring the state (a path with no file starts empty). Give `path` (a remote contents path, as listed by jupyter_list_notebooks) or `local_file` (import a local .ipynb). Pass `kernel` (a kernelspec name) when there is no live kernel and the file records none — otherwise the file's kernelspec, then the config fallback, apply. Open a notebook ONCE and stay in it: calling this again for a path already open in this conversation is a no-op. Never shut a notebook down just to re-open it or to make it 'pick up' your runs — a shutdown + open discards the live kernel state, and a scratch run is recorded only with jupyter_repl(persist=true).",
     parameters: OPEN_NOTEBOOK_PARAMS,
+    promptGuidelines: [
+      "Open a given notebook at most ONCE per conversation, then drive it entirely with jupyter_repl(notebook=<same path>, …). Do NOT shut a notebook down and re-open it to \"refresh\" it, to get a clean state, or to see your runs — a shutdown + open discards the live kernel state; pass persist=true to jupyter_repl to record a cell.",
+      "Do NOT run code by writing a scratch .py/.R (or other) source file and converting/importing it as .ipynb, and do NOT create a new notebook per experiment. Check what exists with jupyter_list_notebooks, pick the one notebook that fits the task, and stay in it for the whole task.",
+    ],
     async execute(_toolCallId, params: OpenNotebookParams, _signal, _onUpdate, ctx) {
       const localRaw = params.local_file?.trim();
       const remoteRaw = params.path?.trim();
@@ -771,7 +789,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
         if (cells.length) lines.push(`${cells.length} code cell(s) loaded from the file for reference.`);
         lines.push("Keep working: no setup needs re-running.");
       } else if (modeText === "started") {
-        lines.push(`Started a NEW ${session.kernelName} kernel bound to ${openPath} (a fresh kernel — in-memory variables were NOT preserved).`);
+        lines.push(`Started a NEW ${session.kernelName} kernel bound to ${openPath} (a fresh kernel — in-memory variables were NOT preserved). Stay in this notebook: keep calling jupyter_repl(notebook="${openPath}", …); pass persist=true to record a cell (a scratch run is intentionally not saved). Do not shut it down and re-open to "see" a run.`);
         if (outcome?.fileExisted) {
           if (cells.length === 0) {
             lines.push("The file existed but holds no code cells — the document starts clean.");
@@ -789,7 +807,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
           lines.push("No file existed at that path yet — the notebook starts empty and will be auto-saved there.");
         }
       } else {
-        lines.push(`Notebook ${openPath} is already open in this conversation (kernel ${session.kernelName}).`);
+        lines.push(`Notebook ${openPath} is already open in this conversation (kernel ${session.kernelName}). Keep working in it with jupyter_repl(notebook="${openPath}", …) — do NOT shut it down and re-open to refresh it.`);
       }
       lines.push("");
       if (cells.length) {
@@ -926,7 +944,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_shutdown_notebook",
     label: "Shut Down Notebook Kernel",
     description:
-      "Shut down one notebook's kernel on the server — its .ipynb file stays, and a later jupyter_open_notebook resumes it with a fresh kernel. `path` may be a notebook open in this conversation or any LIVE kernel bound to that path on the server (left by an earlier conversation or a browser tab). Use /jupyter-reset to shut down everything.",
+      "Shut down one notebook's kernel on the server — its .ipynb file stays, and a later jupyter_open_notebook resumes it with a fresh kernel. `path` may be a notebook open in this conversation or any LIVE kernel bound to that path on the server (left by an earlier conversation or a browser tab). Use /jupyter-reset to shut down everything. This is NOT a way to refresh a notebook or to make your runs appear: it destroys the live kernel's variables/imports. Keep the notebook open for the whole task and record cells with jupyter_repl(persist=true); shut down only when you are really done with it.",
     parameters: SHUTDOWN_NOTEBOOK_PARAMS,
     async execute(_toolCallId, params: ShutdownNotebookParams) {
       const path = normalizeContentsPath(params.path);
@@ -974,7 +992,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_repl",
     label: "Jupyter REPL",
     description:
-      "Execute code in a notebook's persistent kernel on the remote Jupyter Server. `notebook` (required) is the remote contents path of the notebook to run in — pass the path you opened with jupyter_open_notebook to REUSE that session (a not-yet-open notebook is opened the same way first). Variables/imports persist across calls in that notebook's kernel. SCRATCH by default (`persist=false`): the code runs on the kernel and its output is returned, but the notebook document is NOT changed — exploratory/probe code never pollutes the saved .ipynb. Pass `persist=true` for real work that should be kept (an existing same-source cell is re-run in place, otherwise a new cell is appended, and the remote auto-save picks it up). The last expression is the result; use print()/display() for intermediate output; images are returned inline.",
+      "Execute code in a notebook's persistent kernel on the remote Jupyter Server. `notebook` (required) is the remote contents path of the notebook to run in — pass the path you opened with jupyter_open_notebook to REUSE that session (a not-yet-open notebook is opened the same way first). Variables/imports persist across calls in that notebook's kernel. SCRATCH by default (`persist=false`): the code runs on the kernel and its output is returned, but the notebook document is NOT changed — exploratory/probe code never pollutes the saved .ipynb. Pass `persist=true` for real work that should be kept (an existing same-source cell is re-run in place, otherwise a new cell is appended, and the remote auto-save picks it up). The last expression is the result; use print()/display() for intermediate output; images are returned inline. Stay in the SAME notebook for the whole task: pass the same `notebook` path again and again — do NOT shut it down and re-open it to refresh it, and do NOT route code through a scratch .py/.R file; `persist=true` is how a run becomes part of the .ipynb.",
     promptSnippet:
       "jupyter_repl: run code on a remote Jupyter notebook kernel — pass the notebook path opened with jupyter_open_notebook.",
     promptGuidelines: [
@@ -983,6 +1001,8 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       `jupyter_repl has no \`kernel\` or \`dependencies\` parameter — the kernel was fixed when the notebook was opened (live kernel / recorded kernelspec / the \`kernel\` param of jupyter_open_notebook / config fallback).${config.enableAddDependencies ? " Install packages with jupyter_add_dependencies." : ""}`,
       "The last expression is the result; use print()/display() for intermediate output. Images (matplotlib, PIL) come back inline.",
       "jupyter_repl is SCRATCH by default (persist=false): the run's output comes back but it is not written to the notebook. Use it freely for probes/experiments. Pass persist=true only for real work you want recorded; use jupyter_outputs(path) to re-read outputs already saved in a .ipynb without running anything.",
+      "Drive ONE notebook like a REPL for the whole task: pass the same `notebook` path to every call. Do NOT loop jupyter_shutdown_notebook → jupyter_open_notebook to refresh state, and do NOT open a second/new notebook just to see whether a run was recorded — a shutdown wipes the live kernel's variables, while persist=true is what puts a run into the file.",
+      "Never execute by writing a throwaway .py/.R/.jl (or other) source file and converting or importing it as .ipynb, and never fall back to a plain file/shell script to avoid the notebook. Put the code directly into jupyter_repl against the notebook path from jupyter_open_notebook; use jupyter_list_notebooks first if you have not picked that notebook yet.",
     ],
     parameters: JUPYTER_PARAMS,
 

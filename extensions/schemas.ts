@@ -47,7 +47,7 @@ export const JUPYTER_PARAMS = Type.Object({
   persist: Type.Optional(
     Type.Boolean({
       description:
-        "Record this run in the notebook document? Default false = SCRATCH: the code runs on the kernel and its output is returned, but it is NOT added as a cell and does NOT modify an existing matching cell, so exploratory/probe code never pollutes the saved .ipynb. Pass true when the run is real work worth keeping: an existing same-source cell then re-runs in place, or a new cell is appended, and the remote auto-save picks it up.",
+        "Record this run in the notebook document? Default false = SCRATCH: the code runs on the kernel and its output is returned, but it is NOT added as a cell and does NOT modify an existing matching cell, so exploratory/probe code never pollutes the saved .ipynb. Pass true when the run is real work worth keeping: an existing same-source cell then re-runs in place, or a new cell is appended, and the remote auto-save picks it up. This is the ONLY way to make a run appear in the .ipynb — never shut the notebook down and re-open it to try to see a run.",
       default: false,
     }),
   ),
