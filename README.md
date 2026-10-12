@@ -16,7 +16,7 @@ sessions are gone (`jupyter_repl` requires `notebook` and no longer takes `kerne
   still-running kernel when one is bound to the path (no new kernel, variables kept), or
   starts a NEW kernel bound to the same path and **re-runs the file's code cells from
   first to last** so the in-memory state is restored (previously-closed session); pass `replay=skip` to load the document WITHOUT executing anything
-- `jupyter_repl` — execute code in the active notebook session (`notebook` required; the call REUSES that session); variables/imports persist between calls. **SCRATCH by default**: the run's output comes back but the notebook document is NOT changed, so probes/experiments never pollute the file; pass `persist=true` to record real work (an existing same-source cell re-runs in place, otherwise a new cell is appended). Output is capped to the **first 50 + last 100 lines**: when a run prints more, the omitted middle lines are written to a `/tmp/pi-jupyter/*.log` file whose path is returned (and shown in `details.output_truncated`), so a huge print never floods the context — read that file on demand
+- `jupyter_repl` — execute code in the active notebook session (`notebook` required; the call REUSES that session); variables/imports persist between calls. **SCRATCH by default**: the run's output comes back but the notebook document is NOT changed, so probes/experiments never pollute the file; pass `persist=true` to record real work (an existing same-source cell re-runs in place, otherwise a new cell is appended). Pass `cell_id` instead of `code` to RE-RUN an existing cell from its current source — after `jupyter_edit_cell` changed it, no code needs retyping (a `cell_id` run records in place by default). Output is capped to the **first 50 + last 100 lines**: when a run prints more, the omitted middle lines are written to a `/tmp/pi-jupyter/*.log` file whose path is returned (and shown in `details.output_truncated`), so a huge print never floods the context — read that file on demand
 - `jupyter_edit_cell` — edit an OPEN notebook's document in place: `delete` / `replace` / `move` / `insert` a code cell. The in-plugin write path for restructuring a notebook (drop probe/error cells, swap a cell's source, reorder cells); every edit is written to the remote `.ipynb`
 - `jupyter_outputs` — read the outputs a notebook FILE already records, **read-only** (no kernel, nothing executed); re-read a saved table/p-value without parsing the `.ipynb` by hand
 - `jupyter_add_dependencies` — hot-install packages into a notebook's kernel (`%pip` for
@@ -135,8 +135,9 @@ issue 1-1). `jupyter_edit_cell` is the minimal editing surface (issue 1-2):
 | `insert` | `source` (optional `after_cell_id` / `position`) | add a NEW, un-executed cell |
 
 Every edit is written to the remote `.ipynb` right away (unless `JUPYTER_REMOTE_AUTOSAVE=0`).
-After a `replace`, re-run the cell with `jupyter_repl(notebook=…, persist=true)` — it
-matches the cell in place and fills the outputs again. To *promote* a scratch/probe run
+After a `replace`, re-run the cell with `jupyter_repl(notebook=…, cell_id=…)` — it
+matches the cell by id, uses the edited source, and fills the outputs again (`persist`
+then defaults to true, so the code needs no retyping). To *promote* a scratch/probe run
 into the document, re-run it with `persist=true` and `after_cell_id=<neighbour>` so it
 lands in position instead of at the end (issue 1-4).
 

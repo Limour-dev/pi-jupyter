@@ -898,7 +898,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
           lines.push(`  · [${f.index}] ${f.cellId} — ${f.status}: ${f.error}`);
         }
         lines.push(
-          '  Fix or delete them with jupyter_edit_cell, then record their replacements with jupyter_repl(notebook=…, persist=true); do NOT shut down and re-open to "refresh".',
+          '  Fix or delete them with jupyter_edit_cell, then re-run their replacements with jupyter_repl(notebook=…, cell_id=…, persist=true); do NOT shut down and re-open to "refresh".',
         );
       }
       if (newRoots.length) {
@@ -916,7 +916,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
         lines.push(
           `  ~ ${cascades.length} more cell(s) failed immediately after a failure and are reported as DOWNSTREAM CASCADES of their run's first failure (` +
             cascades.map((f) => `[${f.index}]←[${f.upstream}]`).join(", ") +
-            ") — fix the root cell(s) with jupyter_edit_cell, then jupyter_repl(persist=true) to re-record them; do NOT shut down and re-open.",
+            ") — fix the root cell(s) with jupyter_edit_cell, then re-run them with jupyter_repl(notebook=…, cell_id=…, persist=true); do NOT shut down and re-open.",
         );
       }
       return {
@@ -1076,7 +1076,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_repl",
     label: "Jupyter REPL",
     description:
-      "Execute code in a notebook's persistent kernel on the remote Jupyter Server. `notebook` (required) is the remote contents path of the notebook to run in — pass the path you opened with jupyter_open_notebook to REUSE that session (a not-yet-open notebook is opened the same way first). Variables/imports persist across calls in that notebook's kernel. SCRATCH by default (`persist=false`): the code runs on the kernel and its output is returned, but the notebook document is NOT changed — exploratory/probe code never pollutes the saved .ipynb. Pass `persist=true` for real work that should be kept (an existing same-source cell is re-run in place, otherwise a new cell is appended, and the remote auto-save picks it up). The last expression is the result; use print()/display() for intermediate output; images are returned inline. Stay in the SAME notebook for the whole task: pass the same `notebook` path again and again — do NOT shut it down and re-open it to refresh it, and do NOT route code through a scratch .py/.R file; `persist=true` is how a run becomes part of the .ipynb. Use jupyter_edit_cell to restructure the document itself (delete/replace/move/insert a cell); never edit the .ipynb through an external script. Output is capped to the FIRST 50 + LAST 100 lines; when a run prints more, the omitted middle lines are written to a /tmp/pi-jupyter/*.log file whose path is returned (details.output_truncated.log_path) so you can read them on demand instead of flooding the context.",
+      "Execute code in a notebook's persistent kernel on the remote Jupyter Server. `notebook` (required) is the remote contents path of the notebook to run in — pass the path you opened with jupyter_open_notebook to REUSE that session (a not-yet-open notebook is opened the same way first). Variables/imports persist across calls in that notebook's kernel. SCRATCH by default (`persist=false`): the code runs on the kernel and its output is returned, but the notebook document is NOT changed — exploratory/probe code never pollutes the saved .ipynb. Pass `persist=true` for real work that should be kept (an existing same-source cell is re-run in place, otherwise a new cell is appended, and the remote auto-save picks it up). Pass `cell_id` (instead of `code`) to RE-RUN an existing cell from its CURRENT source — the way to refill a cell's outputs after jupyter_edit_cell changed it, with no need to retype the code; a `cell_id` run records in place by default. The last expression is the result; use print()/display() for intermediate output; images are returned inline. Stay in the SAME notebook for the whole task: pass the same `notebook` path again and again — do NOT shut it down and re-open it to refresh it, and do NOT route code through a scratch .py/.R file; `persist=true` is how a run becomes part of the .ipynb. Use jupyter_edit_cell to restructure the document itself (delete/replace/move/insert a cell); never edit the .ipynb through an external script. Output is capped to the FIRST 50 + LAST 100 lines; when a run prints more, the omitted middle lines are written to a /tmp/pi-jupyter/*.log file whose path is returned (details.output_truncated.log_path) so you can read them on demand instead of flooding the context.",
     promptSnippet:
       "jupyter_repl: run code on a remote Jupyter notebook kernel — pass the notebook path opened with jupyter_open_notebook.",
     promptGuidelines: [
@@ -1084,17 +1084,21 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       `Pass the same \`notebook\` path to jupyter_repl${config.enableAddDependencies ? " / jupyter_add_dependencies" : ""}${config.enableSaveNotebook ? " / jupyter_save_notebook" : ""} to REUSE the session. Opening a previously-closed notebook starts a new kernel bound to its file and re-runs the code cells from first to last (state restored); opening a LIVE one attaches with variables kept.`,
       `jupyter_repl has no \`kernel\` or \`dependencies\` parameter — the kernel was fixed when the notebook was opened (live kernel / recorded kernelspec / the \`kernel\` param of jupyter_open_notebook / config fallback).${config.enableAddDependencies ? " Install packages with jupyter_add_dependencies." : ""}`,
       "The last expression is the result; use print()/display() for intermediate output. Images (matplotlib, PIL) come back inline.",
+      "jupyter_repl takes `code` (new code) or `cell_id` (re-run an existing cell from its current, possibly just-edited source) — at least one is required. A `cell_id` run targets that document cell and records in place by default (persist=false opts out to a scratch probe); `code` together with `cell_id` executes the new code into that cell.",
       "jupyter_repl is SCRATCH by default (persist=false): the run's output comes back but it is not written to the notebook. Use it freely for probes/experiments. Pass persist=true only for real work you want recorded; use jupyter_outputs(path) to re-read outputs already saved in a .ipynb without running anything.",
       "Drive ONE notebook like a REPL for the whole task: pass the same `notebook` path to every call. Do NOT loop jupyter_shutdown_notebook → jupyter_open_notebook to refresh state, and do NOT open a second/new notebook just to see whether a run was recorded — a shutdown wipes the live kernel's variables, while persist=true is what puts a run into the file.",
       "Never execute by writing a throwaway .py/.R/.jl (or other) source file and converting or importing it as .ipynb, and never fall back to a plain file/shell script to avoid the notebook. Put the code directly into jupyter_repl against the notebook path from jupyter_open_notebook; use jupyter_list_notebooks first if you have not picked that notebook yet.",
-      'To CHANGE an existing cell, do not just re-run the new code (that appends a duplicate): replace it with jupyter_edit_cell(action="replace", cell_id=…, source=…) and then record it with jupyter_repl(notebook=…, persist=true). Delete probe/error cells with jupyter_edit_cell(action="delete", cell_id=…). Never edit the .ipynb through an external script.',
+      'To CHANGE an existing cell, do not just re-run the new code (that appends a duplicate): replace it with jupyter_edit_cell(action="replace", cell_id=…, source=…) and then re-run THAT cell with jupyter_repl(notebook=…, cell_id=…, persist=true) — it uses the edited source, so the code need not be retyped. Delete probe/error cells with jupyter_edit_cell(action="delete", cell_id=…). Never edit the .ipynb through an external script.',
     ],
     parameters: JUPYTER_PARAMS,
 
     renderCall(args, theme, _context) {
       const text =
         (_context.lastComponent as InstanceType<typeof Text> | undefined) ?? new Text("", 0, 0);
-      const code = (args?.code ?? "").replace(/^\n+/, "");
+      const cellId = (args?.cell_id ?? "").trim();
+      const code =
+        (args?.code ?? "").replace(/^\n+/, "") ||
+        (cellId ? `# re-run cell ${cellId}` : "");
       const key = kernelForNotebook(args?.notebook) || config.kernelName || "default";
       const count = execCounts.get(key) ?? null;
       const prompt = count != null ? `In [${count}]:` : "In [*]:";
@@ -1178,6 +1182,14 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
             " with jupyter_open_notebook first, then pass the same path here.",
         );
       }
+      // `code` or `cell_id` — at least one. With `cell_id` alone the source
+      // comes from the live document below, so an edited cell re-runs as-is.
+      if (params.code === undefined && !params.cell_id?.trim()) {
+        throw new Error(
+          "[pi-jupyter] jupyter_repl needs `code` to run, or `cell_id` to re-run an" +
+            " existing cell (its current source is used, so a just-edited cell needs no retyping).",
+        );
+      }
       const { session: sess, opened, outcome } = await ensureNotebookSession({
         path: notebookRaw,
         cwd: ctx.cwd,
@@ -1197,12 +1209,31 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
           ctx.ui?.notify(`[pi-jupyter] remote auto-save failed (${e.path}): ${e.error}`, "warning");
         }
       };
+      // Resolve what to run. With `cell_id` and no `code`, take the source from
+      // the live document so an edited cell (jupyter_edit_cell replace) is
+      // re-executed exactly as it now stands — no need to retype the code. A
+      // `cell_id` run targets a real document cell, so recording in place is the
+      // default; persist=false still opts out to a scratch probe.
+      const cellIdRaw = params.cell_id?.trim();
+      let code = params.code;
+      if (code === undefined) {
+        const target = sess.listCells().find((c) => c.cellId === cellIdRaw);
+        if (!target) {
+          throw new Error(
+            `[pi-jupyter] no code cell with id "${cellIdRaw}" — list the cell ids with` +
+              " jupyter_open_notebook (details.cells) or jupyter_outputs(path).",
+          );
+        }
+        code = target.source;
+      }
+      const persist = params.persist ?? Boolean(cellIdRaw);
       const timeoutSecs = Math.max(1, params.timeout_secs ?? 120);
-      const result = await sess.runCell(params.code, {
+      const result = await sess.runCell(code, {
         timeoutMs: Math.round(timeoutSecs * 1000),
         // Scratch by default: the agent must opt in with persist=true to write
         // the run into the notebook document (append or in-place re-run).
-        persist: params.persist ?? false,
+        persist,
+        cellId: cellIdRaw,
         afterCellId: params.after_cell_id,
         onUpdate: (progress) => {
           const { content, isError } = formatResult(progress);
@@ -1239,7 +1270,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
           status: result.status,
           execution_count: result.executionCount,
           is_error: isError,
-          persist: params.persist ?? false,
+          persist,
           ...(capped.dropped
             ? {
                 output_truncated: {
@@ -1261,11 +1292,11 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_edit_cell",
     label: "Edit Notebook Cell",
     description:
-      "Edit an OPEN notebook's document in place: delete, replace, move or insert a code cell. This is the in-plugin write path for restructuring a notebook — deleting probe/error cells, replacing a cell with a self-contained version, reordering cells, inserting a promoted scratch cell — so the .ipynb itself is edited from inside the session. Cell ids come from jupyter_open_notebook (details.cells) or jupyter_outputs(path). Replacing a cell CLEARS its old outputs; run the new source with jupyter_repl(notebook=…, persist=true) to fill them again (it matches that cell in place). Every edit is written to the remote .ipynb (unless remote auto-save is off).",
+      "Edit an OPEN notebook's document in place: delete, replace, move or insert a code cell. This is the in-plugin write path for restructuring a notebook — deleting probe/error cells, replacing a cell with a self-contained version, reordering cells, inserting a promoted scratch cell — so the .ipynb itself is edited from inside the session. Cell ids come from jupyter_open_notebook (details.cells) or jupyter_outputs(path). Replacing a cell CLEARS its old outputs; re-run it with jupyter_repl(notebook=…, cell_id=…) to fill them again (the cell is matched by id, using its edited source). Every edit is written to the remote .ipynb (unless remote auto-save is off).",
     parameters: EDIT_CELL_PARAMS,
     promptGuidelines: [
       "Restructure an open notebook with jupyter_edit_cell — delete probe/error cells, replace a cell's source, move cells into order, insert a cell. Do NOT write an external .py script or JSON patch to modify the .ipynb: the live document is the source of truth, and an outside write can be overwritten by the session's auto-save.",
-      'After jupyter_edit_cell(action="replace", …) the cell has NO outputs; re-run it with jupyter_repl(notebook=…, persist=true) to record the result in place. To promote a scratch run, re-run it with persist=true plus after_cell_id.',
+      'After jupyter_edit_cell(action="replace", …) the cell has NO outputs; re-run it with jupyter_repl(notebook=…, cell_id=…) to execute its edited source and record the result in place (persist then defaults to true, so no code needs retyping). To promote a scratch run, re-run it with persist=true plus after_cell_id.',
     ],
     async execute(_toolCallId, params: EditCellParams) {
       const { session: sess } = await ensureNotebookSession({ path: params.notebook });

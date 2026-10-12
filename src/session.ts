@@ -328,16 +328,23 @@ export class RemoteSession implements Session {
   private async executeCell(source: string, opts: RunCellOpts): Promise<CellResult> {
     let kernel = this.requireKernel();
     // In-place re-run (like JupyterLab): when the document already holds a code
-    // cell whose source equals this one, the execution lands back in THAT cell —
-    // same cell id, outputs replaced — instead of appending a duplicate. The
-    // match is by source over ANY code cell (restored from the file OR run
-    // earlier in this session), first in document order, so re-running identical
-    // code always updates the same cell and never duplicates it. Code that
-    // matches no existing cell appends a new one.
-    const inPlaceTarget = this.slots.find(
-      (s): s is Extract<NotebookSlot, { kind: "code" }> =>
-        s.kind === "code" && s.source === source,
-    );
+    // Target selection: an explicit `cellId` (jupyter_repl's `cell_id`) names the
+    // EXACT cell to run. Its source may have just been changed by jupyter_edit_cell,
+    // so the id — not the source text — is the stable handle; the run lands in that
+    // cell and (when persisting) adopts the source actually executed. Without it,
+    // in-place re-run (like JupyterLab) matches a code cell whose source equals this
+    // one — restored from the file OR run earlier in this session, first in document
+    // order — so re-running identical code never duplicates it. Code that matches no
+    // existing cell appends a new one.
+    const inPlaceTarget = opts.cellId
+      ? (this.slots[this.requireCodeSlotIndex(opts.cellId, "re-run")] as Extract<
+          NotebookSlot,
+          { kind: "code" }
+        >)
+      : this.slots.find(
+          (s): s is Extract<NotebookSlot, { kind: "code" }> =>
+            s.kind === "code" && s.source === source,
+        );
     const cellId = inPlaceTarget?.cellId ?? `cell-${randomUUID().slice(0, 8)}`;
     const executionId = `exec-${randomUUID().slice(0, 8)}`;
     const timeoutMs = opts.timeoutMs ?? this.config.defaultTimeoutMs;
@@ -425,6 +432,9 @@ export class RemoteSession implements Session {
       // THIS kernel's result. A restored slot drops its verbatim `raw` so the
       // fresh record serializes from here on; an already-live slot just gets
       // its result replaced — the cell keeps its id and document position.
+      // Adopt the source that actually ran: equal to the slot's own source for a
+      // plain re-run, and the agent's new code for a `cell_id` + `code` replace.
+      inPlaceTarget.source = source;
       inPlaceTarget.result = partial;
       inPlaceTarget.restored = false;
       inPlaceTarget.raw = undefined;
@@ -519,8 +529,8 @@ export class RemoteSession implements Session {
    *
    * - `replace` keeps the cell id and document position, drops any file-verbatim
    *   form, and CLEARS the stale outputs: the old result no longer belongs to
-   *   the new source, and re-running the new source with `persist=true` matches
-   *   this cell in place and fills them again.
+   *   the new source, and re-running this cell by id (`RunCellOpts.cellId`) executes
+   *   its edited source in place and fills the outputs again.
    * - `move` / `insert` address positions by 0-based index among CODE cells.
    * - every action marks the document dirty, so even a delete-only session
    *   writes a final snapshot on shutdown.

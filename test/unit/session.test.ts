@@ -1162,6 +1162,76 @@ describe("RemoteSession — editCell (issue 1-2)", () => {
   });
 });
 
+describe("RemoteSession — runCell by cellId (re-run an edited cell)", () => {
+  let kernel: ReturnType<typeof makeKernelPort>;
+  let server: ReturnType<typeof makeServerPort>;
+
+  beforeEach(() => {
+    kernel = makeKernelPort();
+    server = makeServerPort(kernel);
+  });
+
+  it("targets the named cell by id and executes its CURRENT source in place", async () => {
+    kernel.execute.mockImplementation(async (code: string) => {
+      if (code.includes('"missing"')) {
+        return { outputs: [], status: "ok" as const, executionCount: undefined };
+      }
+      return {
+        outputs: [{ outputType: "stream", name: "stdout", text: "fresh\n" }],
+        status: "ok" as const,
+        executionCount: 9,
+      };
+    });
+    server.readNotebook.mockResolvedValue(FILE_NB());
+    const s = new RemoteSession(server, CONFIG, { contentsPath: "notes/pi.ipynb" });
+    await s.resume("notes/pi.ipynb");
+    // jupyter_edit_cell(replace) changes the source and clears the stale outputs.
+    await s.editCell({ action: "replace", cellId: "cell-a", source: "import numpy as np  # v2" });
+
+    const r = await s.runCell("import numpy as np  # v2", { cellId: "cell-a", persist: true });
+    expect(r.cellId).toBe("cell-a");
+    expect(s.listCells()).toHaveLength(1);
+    expect(s.listCells()[0].source).toBe("import numpy as np  # v2");
+
+    await s.flushAutoSave();
+    const model = server.uploadNotebook.mock.calls.at(-1)?.[1] as { cells: any[] };
+    const code = model.cells.find((c) => c.cell_type === "code");
+    expect(code.id).toBe("cell-a");
+    expect(code.execution_count).toBe(9);
+    expect(code.outputs).toHaveLength(1);
+  });
+
+  it("adopts the executed source when `code` differs from the cell (replace + run)", async () => {
+    server.readNotebook.mockResolvedValue(FILE_NB());
+    const s = new RemoteSession(server, CONFIG, { contentsPath: "notes/pi.ipynb" });
+    await s.resume("notes/pi.ipynb");
+
+    const r = await s.runCell("print('v2')", { cellId: "cell-a", persist: true });
+    expect(r.cellId).toBe("cell-a");
+    expect(s.listCells().map((c) => c.source)).toEqual(["print('v2')"]);
+  });
+
+  it("rejects an unknown cell_id BEFORE anything executes", async () => {
+    server.readNotebook.mockResolvedValue(FILE_NB());
+    const s = new RemoteSession(server, CONFIG, { contentsPath: "notes/pi.ipynb" });
+    await s.resume("notes/pi.ipynb");
+    kernel.execute.mockClear();
+
+    await expect(s.runCell("x", { cellId: "nope" })).rejects.toThrow(/no code cell with id "nope"/);
+    expect(kernel.execute).not.toHaveBeenCalled();
+  });
+
+  it("persist=false with a cellId stays a scratch probe (document untouched)", async () => {
+    server.readNotebook.mockResolvedValue(FILE_NB());
+    const s = new RemoteSession(server, CONFIG, { contentsPath: "notes/pi.ipynb" });
+    await s.resume("notes/pi.ipynb");
+
+    await s.runCell("import numpy as np", { cellId: "cell-a", persist: false });
+    expect(s.listCells()[0].restored).toBe(true);
+    expect(s.listCells()[0].source).toBe("import numpy as np");
+  });
+});
+
 describe("RemoteSession — after_cell_id insert (issue 1-4)", () => {
   let kernel: ReturnType<typeof makeKernelPort>;
   let server: ReturnType<typeof makeServerPort>;

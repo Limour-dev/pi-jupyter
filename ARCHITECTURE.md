@@ -195,7 +195,8 @@ document order) let the tool layer tell the agent exactly what is there.
    from first to last (state restored, failures listed); pass `replay=skip` to load
    the document without executing anything (read-only inspection).
 4. Continuing an active session → `jupyter_repl(notebook=<same path>, code=…)`
-   reuses the session. Runs are scratch unless `persist=true`; `jupyter_outputs(path)` shows the outputs already
+   reuses the session (or pass `cell_id=…` instead of `code` to re-run an existing
+   cell from its current, possibly just-edited source). Runs are scratch unless `persist=true`; `jupyter_outputs(path)` shows the outputs already
    stored in the file. Restructure the document itself with `jupyter_edit_cell`
    (delete/replace/move/insert a cell) — never by editing the `.ipynb` from outside.
 
@@ -236,9 +237,17 @@ Agent-experience fixes sit on top of the v3 model; all are pi-side and touch no 
 - **The document itself is editable, in-plugin (issue 1-2).** `Session.editCell`
   implements delete / replace / move / insert over the live slot array and then
   flushes the snapshot; `jupyter_edit_cell` exposes it. `replace` keeps the cell id
-  and position, drops the file-verbatim `raw`, and clears the stale outputs (so
-  re-running the new source with `persist=true` matches it in place). This is what
-  removes the old external-script workflow whose write raced the auto-save.
+  and position, drops the file-verbatim `raw`, and clears the stale outputs; re-run
+  it with `jupyter_repl(notebook=…, cell_id=…)` to execute the edited source and
+  fill them again in place. This is what removes the old external-script workflow
+  whose write raced the auto-save.
+- **`jupyter_repl` can re-run a cell by id.** `RunCellOpts.cellId` (tool param
+  `cell_id`) targets an EXISTING code cell instead of matching by source, using the
+  cell's current source when `code` is omitted. This is the edit-then-rerun path:
+  `jupyter_edit_cell(replace)` clears a cell's outputs, and
+  `jupyter_repl(notebook=…, cell_id=…)` executes its edited source and records the
+  result back in the SAME cell (a `cell_id` run persists by default; `persist=false`
+  still opts out to a scratch probe).
 - **`persist=true` can record a cell by position (issue 1-4).** `RunCellOpts.afterCellId`
   places a newly-recorded cell directly after a given cell id instead of appending —
   the bridge that promotes a scratch/probe run into the document where it belongs.
@@ -341,7 +350,7 @@ returns the mode + the loaded code cells. `jupyter_repl`,
 
 | Aspect | v2 | v3 |
 |--------|----|----|
-| `jupyter_repl` params | `notebook?` + `kernel?` + `dependencies?` | `notebook` **required**; no `kernel`, no `dependencies` |
+| `jupyter_repl` params | `notebook?` + `kernel?` + `dependencies?` | `notebook` **required**; `code` or `cell_id`; no `kernel`, no `dependencies` |
 | `jupyter_add_dependencies` / `jupyter_save_notebook` | `notebook?` + `kernel?` | `notebook` **required**; no `kernel` |
 | Session kinds | notebook + anonymous-per-kernel | notebook only |
 | Kernel selection | agent's `kernel` param on every code call | fixed at open time (file kernelspec → `kernel` opt on open → config fallback → python3) |

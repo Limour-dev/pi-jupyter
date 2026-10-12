@@ -34,10 +34,18 @@ const NOTEBOOK = Type.String({
 
 export const JUPYTER_PARAMS = Type.Object({
   notebook: NOTEBOOK,
-  code: Type.String({
-    description:
-      "Code to execute in the notebook's persistent kernel. Use print()/display() for side effects; the last expression's repr is the result. SCRATCH by default: the output comes back but the document is untouched unless `persist=true`, in which case re-running an existing same-source cell updates it in place (same cell id, no duplicate) and new code appends a cell.",
-  }),
+  code: Type.Optional(
+    Type.String({
+      description:
+        "Code to execute in the notebook's persistent kernel. Use print()/display() for side effects; the last expression's repr is the result. Omit it (and pass `cell_id`) to re-run an existing cell from its current source. SCRATCH by default: the output comes back but the document is untouched unless `persist=true`, in which case re-running an existing same-source cell updates it in place (same cell id, no duplicate) and new code appends a cell.",
+    }),
+  ),
+  cell_id: Type.Optional(
+    Type.String({
+      description:
+        'Re-run the EXISTING code cell with this id (from jupyter_open_notebook details.cells, jupyter_outputs, or a jupyter_edit_cell result) using its CURRENT source — pass `cell_id` instead of `code` after jupyter_edit_cell(action="replace") to fill the cell\'s outputs again without retyping the source. A `cell_id` run records in place by default (persist defaults to true); pass persist=false for a scratch probe. When both are given, `code` is executed into that cell. Unknown ids are rejected before anything runs.',
+    }),
+  ),
   timeout_secs: Type.Optional(
     Type.Number({
       description: "Max seconds to wait for execution (default 120).",

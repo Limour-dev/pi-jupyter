@@ -67,6 +67,15 @@ export type RunCellOpts = {
    */
   persist?: boolean;
   /**
+   * Run the EXISTING code cell with this id instead of letting the source text
+   * decide which slot to hit — the handle that survives an edit. `jupyter_edit_cell`
+   * changes a cell's `source`, so matching by source could run the wrong slot (or
+   * duplicate); naming the id targets that exact cell and, when persisting, adopts
+   * the source actually executed. Backs `jupyter_repl`'s `cell_id` parameter —
+   * re-running a cell whose source was just edited without retyping it.
+   */
+  cellId?: string;
+  /**
    * When this run RECORDS A NEW CELL, insert it directly after the code cell
    * with this id instead of appending at the end of the document (issue 1-4:
    * "promote" a scratch probe into position, or place a fresh cell where it
