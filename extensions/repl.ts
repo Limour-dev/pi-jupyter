@@ -106,7 +106,7 @@ import { parseNotebook } from "../src/domain/notebook";
 import { JupyterServer } from "../src/kernel/server";
 import { loadNotebooks, touchNotebook } from "../src/notebooks";
 import { normalizeContentsPath, RemoteSession } from "../src/session";
-import { formatResult, stripAnsi } from "./format";
+import { capOutputContent, formatResult, stripAnsi } from "./format";
 import { loadPurposes, savePurposes } from "../src/purposes";
 import {
   ADD_DEPENDENCIES_PARAMS,
@@ -1076,7 +1076,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_repl",
     label: "Jupyter REPL",
     description:
-      "Execute code in a notebook's persistent kernel on the remote Jupyter Server. `notebook` (required) is the remote contents path of the notebook to run in — pass the path you opened with jupyter_open_notebook to REUSE that session (a not-yet-open notebook is opened the same way first). Variables/imports persist across calls in that notebook's kernel. SCRATCH by default (`persist=false`): the code runs on the kernel and its output is returned, but the notebook document is NOT changed — exploratory/probe code never pollutes the saved .ipynb. Pass `persist=true` for real work that should be kept (an existing same-source cell is re-run in place, otherwise a new cell is appended, and the remote auto-save picks it up). The last expression is the result; use print()/display() for intermediate output; images are returned inline. Stay in the SAME notebook for the whole task: pass the same `notebook` path again and again — do NOT shut it down and re-open it to refresh it, and do NOT route code through a scratch .py/.R file; `persist=true` is how a run becomes part of the .ipynb. Use jupyter_edit_cell to restructure the document itself (delete/replace/move/insert a cell); never edit the .ipynb through an external script.",
+      "Execute code in a notebook's persistent kernel on the remote Jupyter Server. `notebook` (required) is the remote contents path of the notebook to run in — pass the path you opened with jupyter_open_notebook to REUSE that session (a not-yet-open notebook is opened the same way first). Variables/imports persist across calls in that notebook's kernel. SCRATCH by default (`persist=false`): the code runs on the kernel and its output is returned, but the notebook document is NOT changed — exploratory/probe code never pollutes the saved .ipynb. Pass `persist=true` for real work that should be kept (an existing same-source cell is re-run in place, otherwise a new cell is appended, and the remote auto-save picks it up). The last expression is the result; use print()/display() for intermediate output; images are returned inline. Stay in the SAME notebook for the whole task: pass the same `notebook` path again and again — do NOT shut it down and re-open it to refresh it, and do NOT route code through a scratch .py/.R file; `persist=true` is how a run becomes part of the .ipynb. Use jupyter_edit_cell to restructure the document itself (delete/replace/move/insert a cell); never edit the .ipynb through an external script. Output is capped to the FIRST 50 + LAST 100 lines; when a run prints more, the omitted middle lines are written to a /tmp/pi-jupyter/*.log file whose path is returned (details.output_truncated.log_path) so you can read them on demand instead of flooding the context.",
     promptSnippet:
       "jupyter_repl: run code on a remote Jupyter notebook kernel — pass the notebook path opened with jupyter_open_notebook.",
     promptGuidelines: [
@@ -1222,8 +1222,14 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
         },
       });
       const { content, isError } = formatResult(result);
+      // Keep the transcript bounded: only the FIRST 50 and the LAST 100 lines
+      // of a cell's output reach the model. The middle is moved to a /tmp log
+      // file the agent can read on demand, so one huge print() cannot flood the
+      // context window. Both ends are kept because a run usually announces what
+      // it is doing first and states its result last.
+      const capped = capOutputContent(content);
       return {
-        content,
+        content: capped.content,
         details: {
           kernel: sess.kernelName,
           notebook: sess.contentsPath,
@@ -1234,6 +1240,14 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
           execution_count: result.executionCount,
           is_error: isError,
           persist: params.persist ?? false,
+          ...(capped.dropped
+            ? {
+                output_truncated: {
+                  dropped_lines: capped.dropped,
+                  log_path: capped.logPaths[0] ?? null,
+                },
+              }
+            : {}),
           runtime: await sess.getRuntimeStatus().catch(() => undefined),
           ...(replay ? { replay: { replayed: replay.replayed, failed: replay.failed, cells: replay.cells } } : {}),
         },

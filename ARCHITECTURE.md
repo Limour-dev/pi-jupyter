@@ -253,6 +253,13 @@ Agent-experience fixes sit on top of the v3 model; all are pi-side and touch no 
   via `ServerPort.readNotebook`, parses it with `parseNotebook`, and reuses
   `formatResult`, so the agent can re-read a stored table/p-value (text + inline
   images) without a kernel and without hand-parsing JSON.
+- **REPL output is capped to head + tail.** `capOutputContent` (extensions/format.ts)
+  keeps at most the FIRST 50 (`MAX_OUTPUT_HEAD_LINES`) and the LAST 100
+  (`MAX_OUTPUT_TAIL_LINES`) lines of a `jupyter_repl` result; when a cell prints more,
+  the omitted MIDDLE lines are written to `/tmp/pi-jupyter/repl-output-*.log` and the
+  returned text carries a note giving that path (also in
+  `details.output_truncated.log_path`), so the agent reads the middle on demand
+  instead of one `print()` flooding the context window.
 - **Replay reports outputs and folds cascades.** `replayFromStart` collects a text
   tail (`outputText`/`outputTail`) per cell and shows it in the open result; a
   failure that immediately follows another failure is tagged as a downstream
