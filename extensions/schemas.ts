@@ -195,6 +195,58 @@ export const OUTPUTS_PARAMS = Type.Object({
   ),
 });
 
+/**
+ * Read-only cell-SOURCE tool (`jupyter_read_cells`): show the code already
+ * written in a notebook FILE that is NOT open, so the agent can borrow an
+ * existing implementation (a helper, a pipeline, a plotting recipe) without
+ * opening the notebook — no kernel, no replay, no document write. The sibling
+ * of `OUTPUTS_PARAMS` (which reads outputs instead of sources).
+ */
+export const READ_CELLS_PARAMS = Type.Object({
+  path: Type.String({
+    description:
+      'Remote contents path of the notebook whose CELL CODE to read, e.g. "notes/pi.ipynb" (as listed by jupyter_list_notebooks). Read-only: no kernel is started, no session is opened and nothing is executed.',
+  }),
+  cell_id: Type.Optional(
+    Type.String({
+      description:
+        "Only read the cell with this id (markdown/raw ids resolve too). Omit to read the code cells (filtered by `query` when given).",
+    }),
+  ),
+  query: Type.Optional(
+    Type.String({
+      description:
+        'Only return cells whose SOURCE matches this filter (case-insensitive). A plain string is a LITERAL substring (e.g. "def fit" or \'df["x"]\', no escaping needed); wrap it in slashes ("/^def \\w+_/") for a JavaScript regex. Use it to find the cells implementing something instead of paging through the whole notebook.',
+    }),
+  ),
+  include_markdown: Type.Optional(
+    Type.Boolean({
+      description:
+        "Also return markdown/raw cells (their text: headings, notes, formulas) so the surrounding documentation is visible. Default false (code cells only).",
+      default: false,
+    }),
+  ),
+  offset: Type.Optional(
+    Type.Number({
+      description:
+        "0-based offset among the MATCHING cells — page through a long notebook (the result says how many matches follow). Default 0.",
+      default: 0,
+    }),
+  ),
+  max_cells: Type.Optional(
+    Type.Number({
+      description:
+        "Max cells to return (default 20, cap 200). The result reports how many matches were omitted — refine `query` or raise this instead of dumping a whole notebook.",
+    }),
+  ),
+  max_lines: Type.Optional(
+    Type.Number({
+      description:
+        "Max source LINES per cell (default 120, cap 5000). Longer cells are head-truncated with a note, so one huge cell cannot flood the context; raise it when you need the tail of a long cell.",
+    }),
+  ),
+});
+
 export const SHUTDOWN_NOTEBOOK_PARAMS = Type.Object({
   path: Type.String({
     description:
@@ -221,6 +273,7 @@ export type SaveNotebookParams = Static<typeof SAVE_NOTEBOOK_PARAMS>;
 export type ListNotebooksParams = Static<typeof LIST_NOTEBOOKS_PARAMS>;
 export type OpenNotebookParams = Static<typeof OPEN_NOTEBOOK_PARAMS>;
 export type OutputsParams = Static<typeof OUTPUTS_PARAMS>;
+export type ReadCellsParams = Static<typeof READ_CELLS_PARAMS>;
 export type ShutdownNotebookParams = Static<typeof SHUTDOWN_NOTEBOOK_PARAMS>;
 export type SetKernelPurposeParams = Static<typeof SET_KERNEL_PURPOSE_PARAMS>;
 export type EditCellParams = Static<typeof EDIT_CELL_PARAMS>;

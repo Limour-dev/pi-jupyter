@@ -306,8 +306,11 @@ function asMimeBundle(data: unknown): ReturnType<typeof normalizeMimebundle> {
   return {};
 }
 
-/** nbformat text/source may be a string or an array of lines. */
-function joinText(value: unknown): string {
+/**
+ * nbformat text/source may be a string or an array of lines — normalize either
+ * to the plain string form the domain works with.
+ */
+export function joinText(value: unknown): string {
   if (typeof value === "string") return value;
   if (Array.isArray(value)) return value.map((v) => (typeof v === "string" ? v : String(v))).join("");
   return "";

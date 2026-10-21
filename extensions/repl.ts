@@ -23,7 +23,9 @@
  *   write throwaway `.py`/`.R` (or other) source files and convert/import them
  *   as `.ipynb` just to execute; put the code straight into `jupyter_repl` on
  *   the notebook you already have open (or `jupyter_open_notebook` a real
- *   notebook first). Use `jupyter_outputs(path)` to re-read saved outputs.
+ *   notebook first). Use `jupyter_outputs(path)` to re-read saved outputs, and
+ *   `jupyter_read_cells(path)` to READ another notebook's code without opening
+ *   it (read-only: no kernel, no replay, nothing executed).
  *
  *   - `jupyter_list_notebooks(dir=…)` first: it shows the notebooks that EXIST
  *     on the server in ONE remote contents directory (required `dir`; read from
@@ -49,7 +51,8 @@
  *     jupyter_repl(notebook=…) REUSES that session. Runs are SCRATCH by
  *     default (`persist=false`): the output is returned but the document is not
  *     modified. Pass `persist=true` to record a cell; use jupyter_outputs(path)
- *     to read outputs already saved in a file.
+ *     to read outputs already saved in a file, and jupyter_read_cells(path) to
+ *     borrow code from a notebook that is not open (no kernel, no replay).
  *   - There are NO anonymous per-kernel sessions anymore: jupyter_repl /
  *     jupyter_add_dependencies / jupyter_save_notebook all require a
  *     `notebook` path. Which kernel serves a notebook is fixed when it is
@@ -103,6 +106,7 @@ import { CONFIG_HINT, isConfigured, loadConfig, loadToolGates } from "../src/con
 import type { CellResult, ContentsEntry, ResumeOutcome, Session } from "../src/domain/types";
 import { mergeNotebookRows } from "../src/domain/listing";
 import { parseNotebook } from "../src/domain/notebook";
+import { cellSourceHeader, selectCellSources } from "../src/domain/source";
 import { JupyterServer } from "../src/kernel/server";
 import { loadNotebooks, touchNotebook } from "../src/notebooks";
 import { normalizeContentsPath, RemoteSession } from "../src/session";
@@ -116,6 +120,7 @@ import {
   LIST_NOTEBOOKS_PARAMS,
   OPEN_NOTEBOOK_PARAMS,
   OUTPUTS_PARAMS,
+  READ_CELLS_PARAMS,
   SAVE_NOTEBOOK_PARAMS,
   SET_KERNEL_PURPOSE_PARAMS,
   SHUTDOWN_NOTEBOOK_PARAMS,
@@ -125,6 +130,7 @@ import {
   type ListNotebooksParams,
   type OpenNotebookParams,
   type OutputsParams,
+  type ReadCellsParams,
   type SaveNotebookParams,
   type SetKernelPurposeParams,
   type ShutdownNotebookParams,
@@ -276,6 +282,17 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       description:
         "Read the outputs a notebook FILE already records (read-only). Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
       parameters: OUTPUTS_PARAMS,
+      async execute() {
+        throw new Error(CONFIG_HINT);
+      },
+    });
+
+    pi.registerTool({
+      name: "jupyter_read_cells",
+      label: "Read Notebook Cell Code",
+      description:
+        "Read the code in a notebook FILE's cells without opening it (read-only). Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.",
+      parameters: READ_CELLS_PARAMS,
       async execute() {
         throw new Error(CONFIG_HINT);
       },
@@ -758,6 +775,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       "Open a given notebook at most ONCE per conversation, then drive it entirely with jupyter_repl(notebook=<same path>, …). Do NOT shut a notebook down and re-open it to \"refresh\" it, to get a clean state, or to see your runs — a shutdown + open discards the live kernel state; pass persist=true to jupyter_repl to record a cell.",
       "Do NOT run code by writing a scratch .py/.R (or other) source file and converting/importing it as .ipynb, and do NOT create a new notebook per experiment. Check what exists with jupyter_list_notebooks, pick the one notebook that fits the task, and stay in it for the whole task.",
       'Pass replay="skip" to jupyter_open_notebook when you only need to READ the current file (cell list and saved outputs): it loads the document and executes nothing, so a heavy notebook is not re-run just to be inspected. A skipped replay leaves the new kernel with no state — rebuild only what you need with jupyter_repl(notebook=…, persist=true).',
+      "To READ code that lives in another notebook, do not open it at all — jupyter_read_cells(path=…) returns its cell sources read-only (optional query/cell_id, include_markdown for notes), with no kernel and no replay. Opening is only for RUNNING code in that notebook.",
     ],
     async execute(_toolCallId, params: OpenNotebookParams, _signal, _onUpdate, ctx) {
       const localRaw = params.local_file?.trim();
@@ -940,7 +958,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_outputs",
     label: "Show Saved Notebook Outputs",
     description:
-      "Read the outputs a notebook FILE already records — READ-ONLY: no kernel is started and no code runs. Use it when a replay/open summary is not enough (e.g. to re-read a table or a p-value already in the file), instead of parsing the .ipynb by hand. Optional `cell_id` narrows to one code cell; images are returned inline.",
+      "Read the outputs a notebook FILE already records — READ-ONLY: no kernel is started and no code runs. Use it when a replay/open summary is not enough (e.g. to re-read a table or a p-value already in the file), instead of parsing the .ipynb by hand. Optional `cell_id` narrows to one code cell; images are returned inline. For the CELL CODE of a file (not its outputs) use jupyter_read_cells(path).",
     parameters: OUTPUTS_PARAMS,
     async execute(_toolCallId, params: OutputsParams) {
       const path = normalizeContentsPath(params.path);
@@ -1003,6 +1021,105 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       return {
         content,
         details: { path, cell_count: codeCells.length, shown: selected.length, cells: summaries },
+      };
+    },
+  });
+
+  // ── jupyter_read_cells ────────────────────────────────────────────────────
+
+  pi.registerTool<typeof READ_CELLS_PARAMS, Record<string, unknown>>({
+    name: "jupyter_read_cells",
+    label: "Read Notebook Cell Code",
+    description:
+      "Read the CODE already written in a notebook FILE — READ-ONLY: no kernel is started, no session is opened and nothing is executed, so a notebook that is NOT open in this conversation is safe to inspect. Use it to BORROW an existing implementation (a helper, a data-cleaning pipeline, a plotting/model recipe) instead of opening that notebook: opening starts or attaches a kernel and, with no live kernel, REPLAYS the whole file, which is far more than reading the code. `query` searches the cell sources (case-insensitive literal substring — `def fit`, `df[\"x\"]` need no escaping — or /regex/), `cell_id` reads one cell, include_markdown=true adds the surrounding notes/headings; results are capped (max_cells / max_lines) and the header says how much was omitted, so page with offset or raise max_cells. Saved OUTPUTS are not returned — use jupyter_outputs(path) for those.",
+    parameters: READ_CELLS_PARAMS,
+    async execute(_toolCallId, params: ReadCellsParams) {
+      const path = normalizeContentsPath(params.path);
+      const server = new JupyterServer(config);
+      let model: Record<string, unknown> | null;
+      try {
+        model = await server.readNotebook(path);
+      } catch (err) {
+        throw new Error(`[pi-jupyter] could not read ${path}: ${(err as Error).message}`);
+      } finally {
+        try { server.dispose(); } catch { /* ignore */ }
+      }
+      if (!model) {
+        throw new Error(
+          `[pi-jupyter] no notebook file at "${path}" (or it is not an nbformat notebook).`,
+        );
+      }
+      const parsed = parseNotebook(model);
+      let sel: ReturnType<typeof selectCellSources>;
+      try {
+        sel = selectCellSources(parsed.slots, {
+          ...(params.cell_id ? { cellId: params.cell_id } : {}),
+          ...(params.query ? { query: params.query } : {}),
+          includeMarkdown: params.include_markdown === true,
+          ...(params.offset !== undefined ? { offset: params.offset } : {}),
+          ...(params.max_cells !== undefined ? { maxCells: params.max_cells } : {}),
+          ...(params.max_lines !== undefined ? { maxLines: params.max_lines } : {}),
+        });
+      } catch (err) {
+        // A typo must be reported, not silently rendered as an empty notebook.
+        throw new Error(`[pi-jupyter] ${(err as Error).message}`);
+      }
+      const kindNote = params.include_markdown ? "cell(s)" : "code cell(s)";
+      const details = {
+        path,
+        kernel: parsed.meta?.kernelName ?? null,
+        cell_count: sel.total,
+        matched: sel.matched,
+        shown: sel.shown,
+        offset: sel.offset,
+        omitted: sel.omitted,
+        cells: sel.cells.map((c) => ({
+          index: c.index,
+          cell_id: c.cellId,
+          kind: c.kind,
+          execution_count: c.executionCount,
+          lines: c.lines,
+          truncated: c.truncated,
+        })),
+      };
+      if (sel.shown === 0) {
+        const why = params.cell_id
+          ? `no cell with id "${params.cell_id}" in ${path}`
+          : params.query
+            ? `${path} has no ${kindNote} matching ${JSON.stringify(params.query)}`
+            : `${path} has no ${kindNote}`;
+        const hint = sel.markdownHidden
+          ? " Markdown/raw cells are hidden — pass include_markdown=true to read those notes."
+          : "";
+        return {
+          content: [{ type: "text", text: `${why}.${hint}` }],
+          details: { ...details, cells: [] },
+        };
+      }
+      const blocks: string[] = [
+        `${path} — ${sel.matched} matching ${kindNote} in a file of ${sel.total} cell(s); ` +
+          `showing #${sel.offset + 1}–#${sel.offset + sel.shown}` +
+          (sel.markdownHidden ? " (markdown/raw hidden: pass include_markdown=true)" : "") +
+          ".",
+      ];
+      for (const cell of sel.cells) {
+        let body = `${cellSourceHeader(cell)}\n${cell.text}`;
+        if (cell.truncated) {
+          body += `\n…(${cell.omittedLines} more line(s) in this cell — raise max_lines to read them)`;
+        }
+        blocks.push(body);
+      }
+      if (sel.omitted > 0) {
+        blocks.push(
+          `…(${sel.omitted} more matching cell(s) not shown — pass offset=${sel.offset + sel.shown} or raise max_cells)`,
+        );
+      }
+      blocks.push(
+        "Nothing was opened or executed. jupyter_outputs(path) reads this file's saved OUTPUTS; jupyter_open_notebook(path) is only needed to RUN code in it.",
+      );
+      return {
+        content: [{ type: "text", text: blocks.join("\n\n") }],
+        details,
       };
     },
   });
@@ -1086,6 +1203,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       "The last expression is the result; use print()/display() for intermediate output. Images (matplotlib, PIL) come back inline.",
       "jupyter_repl takes `code` (new code) or `cell_id` (re-run an existing cell from its current, possibly just-edited source) — at least one is required. A `cell_id` run targets that document cell and records in place by default (persist=false opts out to a scratch probe); `code` together with `cell_id` executes the new code into that cell.",
       "jupyter_repl is SCRATCH by default (persist=false): the run's output comes back but it is not written to the notebook. Use it freely for probes/experiments. Pass persist=true only for real work you want recorded; use jupyter_outputs(path) to re-read outputs already saved in a .ipynb without running anything.",
+      "Need code that another notebook already implements (a helper, a pipeline, a plotting/model recipe)? Use jupyter_read_cells(path=…, query=… or cell_id=…) — read-only: no kernel, no replay, nothing executed — and do NOT jupyter_open_notebook that notebook just to look at its code.",
       "Drive ONE notebook like a REPL for the whole task: pass the same `notebook` path to every call. Do NOT loop jupyter_shutdown_notebook → jupyter_open_notebook to refresh state, and do NOT open a second/new notebook just to see whether a run was recorded — a shutdown wipes the live kernel's variables, while persist=true is what puts a run into the file.",
       "Never execute by writing a throwaway .py/.R/.jl (or other) source file and converting or importing it as .ipynb, and never fall back to a plain file/shell script to avoid the notebook. Put the code directly into jupyter_repl against the notebook path from jupyter_open_notebook; use jupyter_list_notebooks first if you have not picked that notebook yet.",
       'To CHANGE an existing cell, do not just re-run the new code (that appends a duplicate): replace it with jupyter_edit_cell(action="replace", cell_id=…, source=…) and then re-run THAT cell with jupyter_repl(notebook=…, cell_id=…, persist=true) — it uses the edited source, so the code need not be retyped. Delete probe/error cells with jupyter_edit_cell(action="delete", cell_id=…). Never edit the .ipynb through an external script.',

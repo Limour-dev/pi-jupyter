@@ -19,6 +19,7 @@ sessions are gone (`jupyter_repl` requires `notebook` and no longer takes `kerne
 - `jupyter_repl` — execute code in the active notebook session (`notebook` required; the call REUSES that session); variables/imports persist between calls. **SCRATCH by default**: the run's output comes back but the notebook document is NOT changed, so probes/experiments never pollute the file; pass `persist=true` to record real work (an existing same-source cell re-runs in place, otherwise a new cell is appended). Pass `cell_id` instead of `code` to RE-RUN an existing cell from its current source — after `jupyter_edit_cell` changed it, no code needs retyping (a `cell_id` run records in place by default). Output is capped to the **first 50 + last 100 lines**: when a run prints more, the omitted middle lines are written to a `/tmp/pi-jupyter/*.log` file whose path is returned (and shown in `details.output_truncated`), so a huge print never floods the context — read that file on demand
 - `jupyter_edit_cell` — edit an OPEN notebook's document in place: `delete` / `replace` / `move` / `insert` a code cell. The in-plugin write path for restructuring a notebook (drop probe/error cells, swap a cell's source, reorder cells); every edit is written to the remote `.ipynb`
 - `jupyter_outputs` — read the outputs a notebook FILE already records, **read-only** (no kernel, nothing executed); re-read a saved table/p-value without parsing the `.ipynb` by hand
+- `jupyter_read_cells` — read the **code already written** in a notebook FILE without opening it, **read-only** (no kernel, no replay, nothing executed). `query` searches the cell sources (case-insensitive literal substring, or `/regex/`), `cell_id` reads one cell, `include_markdown=true` adds the notes/headings; cells and lines are capped with a note about what was omitted — the way an agent borrows an existing helper/pipeline/recipe instead of re-inventing it (and instead of opening a notebook just to look at it)
 - `jupyter_add_dependencies` — hot-install packages into a notebook's kernel (`%pip` for
   Python, `install.packages` for R), no restart — **OPT-IN tool** (off by default, see *Tool gates* below)
 - `jupyter_list_kernels` — discover the kernels (python3, ir, …) on the server; shows each
@@ -83,6 +84,10 @@ that was opened by `jupyter_open_notebook`. A NEW agent follows this flow:
    open for the whole task — never shut it down and re-open it to refresh state.
    Restructure the document with `jupyter_edit_cell` (delete/replace/move/insert a cell)
    instead of editing the `.ipynb` from outside.
+5. Need code that another notebook already implements? Do NOT open it —
+   `jupyter_read_cells(path=…)` reads its cell sources read-only (optional `query` /
+   `cell_id` / `include_markdown`), so a reference implementation can be borrowed
+   without starting a kernel or replaying the file.
 
 ```text
 you:   "continue my notes/pi.ipynb"
@@ -150,6 +155,28 @@ heavy notebook costs nothing to inspect. The new kernel then has no state — re
 the cells you need with `jupyter_repl(..., persist=true)`. When a replay does fail, the
 summary separates failures the FILE already recorded as errors (the notebook's old debt)
 from failures this replay produced.
+
+### Borrowing code from a notebook you do not open
+
+To *reuse* what another notebook already does — a plotting helper, a data-cleaning
+pipeline, a model-fitting recipe — do **not** open it. `jupyter_read_cells(path=…)`
+reads the file's cell SOURCE directly: no kernel, no replay, nothing executed, and
+the notebook stays out of the conversation:
+
+```text
+agent: jupyter_list_notebooks(dir="analysis", recursive=true)     # find candidates
+agent: jupyter_read_cells(path="analysis/plots.ipynb", query="def ")  # borrow the helpers
+agent: jupyter_read_cells(path="analysis/plots.ipynb", cell_id="q3f2") # read one cell
+agent: jupyter_read_cells(path="analysis/clean.ipynb", include_markdown=true) # code + notes
+```
+
+- `query` is a case-insensitive **literal** substring (`def fit`, `df["x"]` need no
+  escaping); wrap it in slashes (`/^def \w+/`) for a regex. No match is a normal
+  empty answer; a bad regex or an unknown `cell_id` is an error, never a silent empty list.
+- Results are capped (`max_cells` default 20, `max_lines` default 120 per cell) and the
+  header reports the omitted matches/cells, so page with `offset` or raise the caps.
+- Outputs are not returned — `jupyter_outputs(path)` reads the saved outputs, and
+  `jupyter_open_notebook(path)` is only needed to actually RUN code there.
 
 ### Which kernel runs the code? Decided when the notebook is opened.
 

@@ -59,7 +59,8 @@ dual-channel execution protocol, the two JSON stores, the offline test suite).
                 │ uses
 ┌───────────────▼───────────────────────────────────────────────────────┐
 │  src/domain/            pure core (ZERO external dependencies)        │
-│    types.ts  output.ts  notebook.ts  listing.ts  deps.ts  bootstrap.ts  subject.ts│
+│    types.ts  output.ts  notebook.ts  source.ts  listing.ts  deps.ts        │
+│    bootstrap.ts  subject.ts                                             │
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -199,6 +200,9 @@ document order) let the tool layer tell the agent exactly what is there.
    cell from its current, possibly just-edited source). Runs are scratch unless `persist=true`; `jupyter_outputs(path)` shows the outputs already
    stored in the file. Restructure the document itself with `jupyter_edit_cell`
    (delete/replace/move/insert a cell) — never by editing the `.ipynb` from outside.
+5. Need code another notebook already implements → `jupyter_read_cells(path=…)`
+   (optional `query` / `cell_id` / `include_markdown`) reads its SOURCES without
+   opening it: no kernel, no replay, nothing executed.
 
 The flow is deliberately **single-notebook**: `jupyter_open_notebook` is called
 once to start/continue a session, and every later step reuses it. It is NOT an
@@ -262,6 +266,15 @@ Agent-experience fixes sit on top of the v3 model; all are pi-side and touch no 
   via `ServerPort.readNotebook`, parses it with `parseNotebook`, and reuses
   `formatResult`, so the agent can re-read a stored table/p-value (text + inline
   images) without a kernel and without hand-parsing JSON.
+- **`jupyter_read_cells(path)` reads SOURCE, not a session.** The sibling of
+  `jupyter_outputs`: same `ServerPort.readNotebook` → `parseNotebook` path, but
+  it projects the slots to cell sources (`domain/source.ts` `cellSources`),
+  filters by `cell_id` / a case-insensitive literal-or-`/regex/` `query`, and
+  returns the code with `max_cells` / `max_lines` caps plus an explicit
+  omitted-count. Opening a notebook just to LOOK at its code would attach/start
+  a kernel and, with no live kernel, replay the whole file — read-only is both
+  cheaper and side-effect free, so an agent can borrow an existing
+  implementation from a notebook it never opens.
 - **REPL output is capped to head + tail.** `capOutputContent` (extensions/format.ts)
   keeps at most the FIRST 50 (`MAX_OUTPUT_HEAD_LINES`) and the LAST 100
   (`MAX_OUTPUT_TAIL_LINES`) lines of a `jupyter_repl` result; when a cell prints more,

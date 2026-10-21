@@ -35,12 +35,28 @@ export {
   notebookMetaOf,
   parseNotebook,
   serializeCodeCell,
+  joinText,
   splitLines,
   type CellRecord,
   type NotebookMeta,
   type NotebookSlot,
   type ParsedNotebook,
 } from "./domain/notebook";
+export {
+  DEFAULT_MAX_CELLS,
+  DEFAULT_MAX_LINES,
+  MAX_CELLS_LIMIT,
+  MAX_LINES_LIMIT,
+  cellSourceHeader,
+  cellSources,
+  compileCellQuery,
+  selectCellSources,
+  type CellKind,
+  type CellSource,
+  type CellSourceMatch,
+  type CellSourceQuery,
+  type CellSourceSelection,
+} from "./domain/source";
 export { buildInstallCode } from "./domain/deps";
 export { BOOTSTRAP_CODE, MISSING_PACKAGES_PROBE, parseMissingPackages } from "./domain/bootstrap";
 export { Subject } from "./domain/subject";
