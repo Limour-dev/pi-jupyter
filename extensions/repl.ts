@@ -773,7 +773,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     parameters: OPEN_NOTEBOOK_PARAMS,
     promptGuidelines: [
       "Open a given notebook at most ONCE per conversation, then drive it entirely with jupyter_repl(notebook=<same path>, …). Do NOT shut a notebook down and re-open it to \"refresh\" it, to get a clean state, or to see your runs — a shutdown + open discards the live kernel state; pass persist=true to jupyter_repl to record a cell.",
-      "Do NOT run code by writing a scratch .py/.R (or other) source file and converting/importing it as .ipynb, and do NOT create a new notebook per experiment. Check what exists with jupyter_list_notebooks, pick the one notebook that fits the task, and stay in it for the whole task.",
+      "Do NOT run code by writing a scratch .py/.R (or other) source file and converting/importing it as .ipynb. Check what exists with jupyter_list_notebooks, pick the one notebook that fits the task, and stay in it for the whole task.",
       'Pass replay="skip" to jupyter_open_notebook when you only need to READ the current file (cell list and saved outputs): it loads the document and executes nothing, so a heavy notebook is not re-run just to be inspected. A skipped replay leaves the new kernel with no state — rebuild only what you need with jupyter_repl(notebook=…, persist=true).',
       "To READ code that lives in another notebook, do not open it at all — jupyter_read_cells(path=…) returns its cell sources read-only (optional query/cell_id, include_markdown for notes), with no kernel and no replay. Opening is only for RUNNING code in that notebook.",
     ],
@@ -1515,7 +1515,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       name: "jupyter_save_notebook",
       label: "Save Notebook",
       description:
-        "Save a notebook session as a local .ipynb file (openable in Jupyter / VSCode). `path` defaults to <notebook-id>.ipynb in the working directory; relative paths resolve against the working directory, so prefer absolute paths or ~/.",
+        "Save a notebook session as a local .ipynb file (openable in Jupyter / VSCode). Missing parent directories are created automatically. `path` defaults to <notebook-id>.ipynb in the working directory; relative paths resolve against the working directory, so prefer absolute paths or ~/.",
       parameters: SAVE_NOTEBOOK_PARAMS,
       async execute(_toolCallId, params: SaveNotebookParams, signal, _onUpdate, ctx) {
         if (signal?.aborted) throw new Error("aborted");

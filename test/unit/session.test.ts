@@ -5,7 +5,7 @@
  * (init, run, deps, save, shutdown, observable) is verified with zero Jupyter
  * Server and zero network.
  */
-import { readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -192,7 +192,7 @@ describe("RemoteSession", () => {
     expect(code).toBe("%pip install --quiet numpy");
   });
 
-  it("saveNotebook writes a valid nbformat file", async () => {
+  it("saveNotebook creates missing parents and writes a valid nbformat file", async () => {
     kernel.execute.mockResolvedValue({
       outputs: [{ outputType: "stream", name: "stdout", text: "x\n" }],
       status: "ok" as const,
@@ -201,12 +201,16 @@ describe("RemoteSession", () => {
     const s = new RemoteSession(server, CONFIG, { notebookId: "nb-test" });
     await s.initialize();
     await s.runCell("print('x')");
-    const path = join(tmpdir(), `pi-jupyter-test-${Date.now()}.ipynb`);
-    await s.saveNotebook(path);
-    const nb = JSON.parse(readFileSync(path, "utf-8"));
-    expect(nb.nbformat).toBe(4);
-    expect(nb.cells).toHaveLength(1);
-    rmSync(path, { force: true });
+    const dir = mkdtempSync(join(tmpdir(), "pi-jupyter-test-"));
+    try {
+      const path = join(dir, "missing", "nested", "nb-test.ipynb");
+      expect(await s.saveNotebook(path)).toBe(path);
+      const nb = JSON.parse(readFileSync(path, "utf-8"));
+      expect(nb.nbformat).toBe(4);
+      expect(nb.cells).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("shutdown disposes the kernel", async () => {

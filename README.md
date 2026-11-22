@@ -263,6 +263,8 @@ The session snapshot is uploaded to the remote Jupyter Server via the Contents A
 The upload is a by-pass: it never blocks or changes the tool result, rapid changes are
 coalesced (an older snapshot can never overwrite a newer one), and failures only produce a
 warning. `jupyter_shutdown_notebook` reports whether its final snapshot was written.
+Before each upload to a subdirectory, the extension checks the remote parent directory
+and creates any missing directories.
 
 - **Default target = remote `$HOME`.** The file is written to the contents root as the
   notebook's path. In a default `jupyter_server` deployment the contents root *is* the
@@ -271,8 +273,8 @@ warning. `jupyter_shutdown_notebook` reports whether its final snapshot was writ
 - **Open in a browser, reuse the same kernel.** The auto-save path and the `/api/sessions`
   bind row share one name, so opening that `.ipynb` in JupyterLab connects to the *running*
   kernel — variables are shared both ways between the browser and the agent.
-- `jupyter_save_notebook` is unchanged: it still writes **locally** and is independent of
-  the remote auto-save.
+- `jupyter_save_notebook` writes **locally**, creates missing parent directories, and is
+  independent of remote auto-save.
 
 ## Multiple kernels (R and others)
 

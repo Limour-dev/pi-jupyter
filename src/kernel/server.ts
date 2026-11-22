@@ -31,8 +31,6 @@ export class JupyterServer implements ServerPort {
   readonly settings: ServerConnection.ISettings;
   private kernels: KernelManager;
   private sessions?: SessionManager; // 懒加载，仅 bind 模式用到
-  /** Parent directories already created on the server (avoids a PUT per cell). */
-  private ensuredDirs = new Set<string>();
 
   constructor(private config: ShimConfig) {
     const baseUrl = config.url.replace(/\/?$/, "/");
@@ -274,9 +272,7 @@ export class JupyterServer implements ServerPort {
   /**
    * Write an nbformat model to the remote Contents API (FR-2):
    * `PUT /api/contents/<path>` is create-or-update (201 new / 200 existing).
-   * Some jupyter_server deployments do NOT create missing parent directories
-   * on save (they fail with HTTP 500), so `ensureParentDirs` creates them
-   * first when the path contains sub-directories (R3.4).
+   * Check the parent directory before uploading and create any missing ancestors.
    * Reuses the SAME `ServerConnection.ISettings` (hence the same token/auth
    * path) as `ping()` / `listKernelSpecs()` — we never set our own
    * Authorization header (that would trigger the `_xsrf` failure, see the
@@ -303,17 +299,30 @@ export class JupyterServer implements ServerPort {
   }
 
   /**
-   * Create the parent directory of `contentsPath` on the server when needed.
-   * `PUT` with `{type:"directory"}` is idempotent (the server no-ops on an
-   * existing dir and `os.makedirs` is recursive), and successful parents are
-   * cached so steady-state cells cost zero extra requests.
+   * Check the immediate parent without fetching its contents. If it is missing,
+   * create ancestors from the top down: a directory PUT need not be recursive.
+   * Do not cache this check; folders can be deleted between saves.
    */
   private async ensureParentDirs(contentsPath: string): Promise<void> {
     const idx = contentsPath.lastIndexOf("/");
     if (idx <= 0) return; // file sits at the contents root
     const parent = contentsPath.slice(0, idx);
-    if (this.ensuredDirs.has(parent)) return;
     const url = `${this.settings.baseUrl}api/contents/${encodeContentsPath(parent)}`;
+    const existing = await ServerConnection.makeRequest(`${url}?content=0`, { method: "GET" }, this.settings);
+    if (existing.ok) {
+      const model = (await existing.json()) as { type?: string };
+      if (model.type !== "directory") {
+        throw new Error(`[pi-jupyter] remote path "${parent}" is not a directory`);
+      }
+      return;
+    }
+    if (existing.status !== 404) {
+      throw new Error(
+        `[pi-jupyter] could not check remote directory "${parent}": HTTP ${existing.status} ${existing.statusText}`.trim(),
+      );
+    }
+
+    await this.ensureParentDirs(parent);
     const res = await ServerConnection.makeRequest(
       url,
       {
@@ -330,7 +339,6 @@ export class JupyterServer implements ServerPort {
           `HTTP ${res.status} ${res.statusText} ${detail}`.trim(),
       );
     }
-    this.ensuredDirs.add(parent);
   }
 
   dispose(): void {
