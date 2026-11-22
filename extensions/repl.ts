@@ -582,7 +582,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       try { server.dispose(); } catch { /* ignore */ }
     }
     const store = loadNotebooks();
-    const { rows, stale } = mergeNotebookRows({
+    const { rows } = mergeNotebookRows({
       dir,
       recursive,
       ...(query ? { query } : {}),
@@ -635,12 +635,6 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
         );
       }
     }
-    if (stale.length) {
-      lines.push("");
-      lines.push(
-        `  (${stale.length} stale registry entr${stale.length === 1 ? "y" : "ies"} hidden — no such file on the server: ${stale.join(", ")})`,
-      );
-    }
     return {
       text: lines.join("\n"),
       details: {
@@ -649,7 +643,6 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
         ...(query ? { query } : {}),
         server_listed: serverListed,
         notebooks: rows,
-        stale,
         live_paths: liveShown.map((r) => r.path),
       },
     };

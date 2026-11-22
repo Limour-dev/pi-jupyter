@@ -262,8 +262,8 @@ written (issue 1-6).
 merges it with the server's LIVE `/api/sessions` rows (`ServerPort.listSessions`)
 **and the server's contents listing** (`ServerPort.listDirectory`). The listing is
 what makes a notebook pi NEVER opened visible, and what proves a registry entry
-whose file is gone is a ghost — those are dropped as `stale` instead of being
-shown (`domain/listing.ts` `mergeNotebookRows`, pure and unit-tested). `dir` is
+whose file is gone is a ghost — those are silently omitted from the tool result
+(`domain/listing.ts` `mergeNotebookRows`, pure and unit-tested). `dir` is
 required; only DIRECT children are listed unless `recursive=true`, and `query`
 does a case-insensitive substring search, so the agent can find a notebook in one
 call instead of paging folders. Every row is annotated — **LIVE kernel → attach,

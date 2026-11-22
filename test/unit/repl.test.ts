@@ -2,12 +2,13 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import register from "../../extensions/repl";
 import type { ExecuteOptions, ExecuteOutcome } from "../../src/kernel/port";
+import { loadNotebooks } from "../../src/notebooks";
 
 // Exercise the registered tools and the real RemoteSession. Only the host,
 // registry, and remote ports are replaced; no network or home-directory writes.
 vi.mock("@earendil-works/pi-coding-agent", () => ({ highlightCode: vi.fn() }));
 vi.mock("@earendil-works/pi-tui", () => ({ Text: class {} }));
-vi.mock("../../src/notebooks", () => ({ touchNotebook: vi.fn() }));
+vi.mock("../../src/notebooks", () => ({ loadNotebooks: vi.fn(() => ({})), touchNotebook: vi.fn() }));
 vi.mock("../../src/kernel/server", () => ({ JupyterServer: class { constructor() { return server; } } }));
 
 const model = { metadata: { kernelspec: { name: "ir", language: "r" } }, cells:
@@ -16,6 +17,7 @@ const execute = vi.fn(async (_source: string, _opts: ExecuteOptions): Promise<Ex
 const server = {
   ping: vi.fn(), readNotebook: vi.fn(async () => model), findLiveSession: vi.fn(async () => null),
   listKernelSpecs: vi.fn(async () => ({ specs: [{ name: "ir", language: "r" }] })),
+  listDirectory: vi.fn(), listSessions: vi.fn(async () => []),
   startKernel: vi.fn(async () => ({ status: "idle", waitConnected: vi.fn(), execute })), dispose: vi.fn(),
 };
 
@@ -45,6 +47,25 @@ beforeEach(() => {
   vi.stubEnv("JUPYTER_REMOTE_TIMEOUT_MS", undefined);
 });
 afterEach(() => vi.unstubAllEnvs());
+
+describe("jupyter_list_notebooks", () => {
+  it("silently omits stale registry entries from text and details", async () => {
+    vi.mocked(loadNotebooks).mockReturnValueOnce({
+      "notes/deleted.ipynb": { kernelName: "python3", updated: "2026-01-01", source: "remote" },
+    });
+    server.listDirectory.mockResolvedValueOnce({
+      exists: true,
+      entries: [{ path: "notes/current.ipynb", name: "current.ipynb", type: "notebook" }],
+    });
+
+    const { content, details } = await tools()("list_notebooks", { dir: "notes" });
+
+    expect(content[0].text).toContain("notes/current.ipynb");
+    expect(content[0].text).not.toMatch(/stale registry|notes\/deleted\.ipynb/);
+    expect(details.notebooks.map((row: { path: string }) => row.path)).toEqual(["notes/current.ipynb"]);
+    expect(details).not.toHaveProperty("stale");
+  });
+});
 
 describe("notebook tool initialization", () => {
   const path = "demo.ipynb";
