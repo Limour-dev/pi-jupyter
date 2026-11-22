@@ -154,6 +154,24 @@ function saveMessage(result: RemoteSaveResult): string {
   }
 }
 
+/** Final execution output shared by standalone REPL calls and edit-and-run. */
+function executionReply(result: CellResult) {
+  const { content, isError } = formatResult(result);
+  const capped = capOutputContent(content);
+  return {
+    content: capped.content,
+    details: {
+      cell_id: result.cellId,
+      execution_id: result.executionId,
+      status: result.status,
+      execution_count: result.executionCount,
+      is_error: isError,
+      ...(capped.dropped ? { output_truncated: {
+        dropped_lines: capped.dropped, log_path: capped.logPaths[0] ?? null,
+      } } : {}),
+    },
+  };
+}
 // ── extension ───────────────────────────────────────────────────────────────
 
 export default function piJupyterExtension(pi: ExtensionAPI) {
@@ -1250,34 +1268,16 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
           });
         },
       });
-      const { content, isError } = formatResult(result);
-      // Keep the transcript bounded: only the FIRST 50 and the LAST 100 lines
-      // of a cell's output reach the model. The middle is moved to a /tmp log
-      // file the agent can read on demand, so one huge print() cannot flood the
-      // context window. Both ends are kept because a run usually announces what
-      // it is doing first and states its result last.
-      const capped = capOutputContent(content);
+      const reply = executionReply(result);
       return {
-        content: capped.content,
+        content: reply.content,
         details: {
           kernel: sess.kernelName,
           notebook: sess.contentsPath,
           notebook_id: sess.notebookId,
-          cell_id: result.cellId,
-          execution_id: result.executionId,
-          status: result.status,
-          execution_count: result.executionCount,
-          is_error: isError,
+          ...reply.details,
           persist,
           ...(replayMode ? { replay_mode: replayMode } : {}),
-          ...(capped.dropped
-            ? {
-                output_truncated: {
-                  dropped_lines: capped.dropped,
-                  log_path: capped.logPaths[0] ?? null,
-                },
-              }
-            : {}),
           runtime: await sess.getRuntimeStatus().catch(() => undefined),
           ...(replay ? { replay: { replayed: replay.replayed, failed: replay.failed, cells: replay.cells } } : {}),
         },
@@ -1291,7 +1291,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_edit_cell",
     label: "Edit Notebook Cell",
     description:
-      "Restructure code cells in the session document without executing the edited cell. Reports remote save status separately.",
+      "Edit code cells in the session document. Set run=true on insert or replace to execute the edited cell and return its outputs. Reports remote save status separately.",
     parameters: EDIT_CELL_PARAMS,
     promptGuidelines: [
       "Code alone defaults to scratch; cell_id defaults to recording in place; explicit persist wins. Change document structure with jupyter_edit_cell, not an external .ipynb write.",
@@ -1300,11 +1300,14 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       const { session: sess } = await ensureNotebookSession({ path: params.notebook, replayMode: "skip" });
       const outcome = await sess.editCell({
         action: params.action,
+        run: params.run,
         cellId: params.cell_id,
         source: params.source,
         position: params.position,
         afterCellId: params.after_cell_id,
       });
+      const reply = outcome.execution ? executionReply(outcome.execution) : undefined;
+      if (reply?.details.execution_count != null) execCounts.set(sess.kernelName, reply.details.execution_count + 1);
       const verb =
         outcome.action === "delete"
           ? "Deleted"
@@ -1330,6 +1333,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
               `${verb} cell${outcome.cellId ? ` ${outcome.cellId}` : ""} in ${sess.contentsPath}${positionNote};` +
               ` session document updated. ${saveMessage(outcome.remoteSave)}\nCode cells now:\n${cellList}`,
           },
+          ...(reply?.content ?? []),
         ],
         details: {
           kernel: sess.kernelName,
@@ -1338,6 +1342,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
           action: outcome.action,
           remote_save: outcome.remoteSave,
           cell_id: outcome.cellId ?? null,
+          ...reply?.details,
           index: outcome.index ?? null,
           cells: outcome.cells,
           runtime: await sess.getRuntimeStatus().catch(() => undefined),

@@ -246,6 +246,8 @@ export type CellEditAction = "delete" | "replace" | "move" | "insert";
 
 export type CellEditOpts = {
   action: CellEditAction;
+  /** Execute the inserted or replaced cell in place before flushing the edit. */
+  run?: boolean;
   /** Target cell id for `delete` / `replace` / `move`. */
   cellId?: string;
   /** New source for `replace` / `insert`. */
@@ -262,6 +264,7 @@ export type RemoteSaveResult =
 export type CellEditOutcome = {
   action: CellEditAction;
   remoteSave: RemoteSaveResult;
+  execution?: CellResult;
   /** Id of the affected cell (kept for replace/move; fresh for insert). */
   cellId?: string;
   /** 0-based index of the affected cell among code cells AFTER the edit. */

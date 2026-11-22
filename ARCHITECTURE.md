@@ -180,9 +180,10 @@ in different slots each receive their own execution result.
 - **The document itself is editable, in-plugin (issue 1-2).** `Session.editCell`
   implements delete / replace / move / insert over the live slot array and then
   flushes the snapshot; `jupyter_edit_cell` exposes it. `replace` keeps the cell id
-  and position, drops the file-verbatim `raw`, and clears the stale outputs; re-run
-  it with `jupyter_repl(notebook=…, cell_id=…)` to execute the edited source and
-  fill them again in place. This is what removes the old external-script workflow
+  and position, drops the file-verbatim `raw`, and clears the stale outputs. With
+  `run: true`, insert and replace execute the affected cell by id before flushing;
+  otherwise it can be run later with `jupyter_repl(notebook=…, cell_id=…)`.
+  This is what removes the old external-script workflow
   whose write raced the auto-save.
   The edit receipt uses the result of its bounded flush, not a previous
   successful upload. A timeout leaves the session edit and the worker intact.

@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import register from "../../extensions/repl";
-import type { ExecuteOptions } from "../../src/kernel/port";
+import type { ExecuteOptions, ExecuteOutcome } from "../../src/kernel/port";
 
 // Exercise the registered tools and the real RemoteSession. Only the host,
 // registry, and remote ports are replaced; no network or home-directory writes.
@@ -12,7 +12,7 @@ vi.mock("../../src/kernel/server", () => ({ JupyterServer: class { constructor()
 
 const model = { metadata: { kernelspec: { name: "ir", language: "r" } }, cells:
   ["first", "second"].map(id => ({ id, cell_type: "code", source: "same()", outputs: [] })) };
-const execute = vi.fn(async (_source: string, _opts: ExecuteOptions) => ({ status: "ok", outputs: [], executionCount: 1 }));
+const execute = vi.fn(async (_source: string, _opts: ExecuteOptions): Promise<ExecuteOutcome> => ({ status: "ok", outputs: [], executionCount: 1 }));
 const server = {
   ping: vi.fn(), readNotebook: vi.fn(async () => model), findLiveSession: vi.fn(async () => null),
   listKernelSpecs: vi.fn(async () => ({ specs: [{ name: "ir", language: "r" }] })),
@@ -73,6 +73,28 @@ describe("notebook tool initialization", () => {
     const edit = await call("edit_cell", { notebook: path, action: "insert", source: "new()" });
     expect(edit.details.remote_save.status).toBe("disabled");
     expect(edit.content[0].text).toMatch(/session document updated.*auto-save is disabled/i);
+    expect(execute).not.toHaveBeenCalled();
+  });
+  it.each(["insert", "replace"])("runs the exact cell after %s, even with duplicate sources", async (action) => {
+    const call = tools();
+    execute.mockResolvedValueOnce({ status: "ok", outputs: [{ outputType: "stream", name: "stdout", text: "answer" }], executionCount: 7 });
+    const { details, content } = await call("edit_cell", {
+      notebook: path, action, source: "same()", run: true, ...(action === "replace" ? { cell_id: "second" } : { position: 1 }),
+    });
+    expect(execute.mock.calls.map(([source]) => source)).toEqual(["same()"]);
+    expect(details.cells).toHaveLength(action === "replace" ? 2 : 3);
+    expect(details.cells[0].executionCount).toBeUndefined();
+    expect(details.cells[1]).toMatchObject({ cellId: details.cell_id, executionCount: 7 });
+    expect(details).toMatchObject({ index: 1, status: "done", execution_count: 7, is_error: false });
+    expect(content[1].text).toContain("answer");
+  });
+
+  it.each(["delete", "move"])("rejects run=true before applying %s", async (action) => {
+    const call = tools();
+    await expect(call("edit_cell", { notebook: path, action, cell_id: "first", position: 1, run: true })).rejects.toThrow(/`run`/);
+    const { details } = await call("open_notebook", { path });
+    expect(details.cells.map((c: any) => c.cellId)).toEqual(["first", "second"]);
+    expect(execute).not.toHaveBeenCalled();
   });
   it("honors skip when it arrives first; a concurrent auto open does not replay", async () => {
     const call = tools();

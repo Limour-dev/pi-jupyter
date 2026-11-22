@@ -116,9 +116,13 @@ export const EDIT_CELL_PARAMS = Type.Object({
     [Type.Literal("delete"), Type.Literal("replace"), Type.Literal("move"), Type.Literal("insert")],
     {
       description:
-        'Edit to apply: "delete" removes a cell; "replace" swaps an existing cell\'s source (its stale outputs are cleared — re-run it with jupyter_repl(persist=true) to fill them again); "move" reorders a cell to `position`; "insert" adds a NEW un-executed cell.',
+        'Edit to apply: "delete" removes a cell; "replace" swaps its source and clears stale outputs; "move" reorders a cell to `position`; "insert" adds a new cell.',
     },
   ),
+  run: Type.Optional(Type.Boolean({
+    description: 'For "replace" or "insert", execute the edited cell immediately, record its outputs in place and return them. Defaults to false.',
+    default: false,
+  })),
   cell_id: Type.Optional(
     Type.String({
       description:

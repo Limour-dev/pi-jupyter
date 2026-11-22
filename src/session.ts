@@ -323,7 +323,7 @@ export class RemoteSession implements Session {
   }
 
   /** The actual cell execution; always runs under the kernel lock. */
-  private async executeCell(source: string, opts: RunCellOpts): Promise<CellResult> {
+  private async executeCell(source: string, opts: RunCellOpts, scheduleSave = true): Promise<CellResult> {
     let kernel = this.requireKernel();
     // In-place re-run (like JupyterLab): when the document already holds a code
     // Target selection: an explicit `cellId` (jupyter_repl's `cell_id`) names the
@@ -446,7 +446,7 @@ export class RemoteSession implements Session {
     // Snapshot auto-save after every cell record — done/error/timeout alike
     // (FR-1.2). Runs in the background and is never awaited, so a failure can
     // never change this result (FR-6.1).
-    if (persist) this.scheduleAutoSave();
+    if (persist && scheduleSave) this.scheduleAutoSave();
     return partial;
   }
 
@@ -534,6 +534,9 @@ export class RemoteSession implements Session {
    *   writes a final snapshot on shutdown.
    */
   async editCell(opts: CellEditOpts): Promise<CellEditOutcome> {
+    if (opts.run && opts.action !== "replace" && opts.action !== "insert") {
+      throw new Error('[pi-jupyter] `run` is only supported for "replace" and "insert".');
+    }
     let affectedId: string | undefined;
     switch (opts.action) {
       case "delete": {
@@ -604,12 +607,18 @@ export class RemoteSession implements Session {
       }
     }
     this.docEdited = true;
+    // The edit's flush below covers the execution too; don't queue a second snapshot.
+    const source = opts.source;
+    const execution = opts.run && affectedId && source !== undefined
+      ? await this.withKernelLock(() => this.executeCell(source, { cellId: affectedId }, false))
+      : undefined;
     const remoteSave = await this.flushAutoSave();
     const cells = this.listCells();
     const index = affectedId ? cells.findIndex((c) => c.cellId === affectedId) : -1;
     return {
       action: opts.action,
       remoteSave,
+      ...(execution ? { execution } : {}),
       ...(affectedId ? { cellId: affectedId } : {}),
       ...(index >= 0 ? { index } : {}),
       cells,
