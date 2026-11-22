@@ -5,7 +5,7 @@
  *
  *   domain/   pure logic, zero external deps   (types, output, notebook, deps, bootstrap, subject)
  *   kernel/   @jupyterlab/services adapters    (port, convert, kernel, server)
- *   config    server connection only (url/token); the kernel is agent-decided per call
+ *   config    server connection and session defaults
  *   session   Session impl behind KernelPort
  */
 
@@ -14,6 +14,7 @@ export {
   type CellEditAction,
   type CellEditOpts,
   type CellEditOutcome,
+  type RemoteSaveResult,
   type CellResult,
   type CellStatus,
   type ContentsEntry,

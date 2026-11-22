@@ -7,7 +7,7 @@
  * auto-select the right kernel without re-asking.
  *
  * Important: this store only holds the user's EXPLANATION. It never selects a
- * kernel — the agent still decides per call via the `kernel` parameter
+ * kernel — the agent can request one at open time via the `kernel` parameter
  * (see ARCHITECTURE.md "Who decides the kernel?").
  *
  * File shape: `{ "<kernelspec name>": "<purpose string>", ... }`

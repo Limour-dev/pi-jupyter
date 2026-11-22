@@ -67,6 +67,17 @@ describe("JupyterServer.uploadNotebook", () => {
 
   beforeEach(() => makeRequest.mockReset());
 
+  it("only returns null for a confirmed missing notebook", async () => {
+    makeRequest.mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockResolvedValueOnce(new Response(null, { status: 403 }))
+      .mockResolvedValueOnce(Response.json({ type: "directory", content: [] }))
+      .mockResolvedValueOnce(Response.json({ type: "notebook", content: {} }));
+    const read = () => server.readNotebook("book.ipynb");
+    expect(await read()).toBeNull();
+    await expect(read()).rejects.toThrow("403");
+    await expect(read()).rejects.toThrow(/notebook/);
+    await expect(read()).rejects.toThrow(/cells array/);
+  });
   it("creates missing ancestors before uploading to a nested path", async () => {
     makeRequest
       .mockResolvedValueOnce(new Response(null, { status: 404 }))

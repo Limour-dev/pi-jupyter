@@ -25,6 +25,7 @@ import { Subject } from "./domain/subject";
 import {
   type AutoSaveEvent,
   type AutoSaveInfo,
+  type RemoteSaveResult,
   type CellEditOpts,
   type CellEditOutcome,
   type CellResult,
@@ -119,15 +120,16 @@ export class RemoteSession implements Session {
   private warnings: string[] = [];
   /** Outcome of the most recent remote auto-save (FR-6.4). */
   private lastAutoSave?: AutoSaveInfo;
+  private finalSave?: RemoteSaveResult;
 
-  // ── remote auto-save worker (FR-5): single serial loop, dirty-flag coalesce ──
+  // Serial remote uploads with at most one pending snapshot.
   /** Contents path shared by bind-session and auto-save (INV-1). */
   private effectivePath: string | null = null;
   /** Path-config warning, re-appended after every bootstrap (which resets warnings). */
   private effectivePathWarning?: string;
-  private autoSaveDirty = false;
-  private autoSaveRunning = false;
-  private autoSaveChain: Promise<void> = Promise.resolve();
+  // Shared only until serialization starts. Later edits need the next snapshot.
+  private pendingSave?: Promise<RemoteSaveResult>;
+  private autoSaveChain: Promise<RemoteSaveResult> = Promise.resolve({ status: "unchanged" });
 
   private viewChanges = new Subject<CellResult>();
 
@@ -137,7 +139,7 @@ export class RemoteSession implements Session {
     private opts: CreateSessionOpts = {},
   ) {
     this.notebookId = opts.notebookId ?? notebookIdFromPath(opts.contentsPath) ?? `remote-${Date.now()}-${randomUUID().slice(0, 8)}`;
-    // The kernel is chosen by the agent per call (ARCHITECTURE.md);
+    // The kernel is fixed when opening a notebook;
     // config.kernelName is only the optional fallback default. resume() may
     // re-derive it from the adopted file / the live kernel.
     this._kernelName = opts.kernelName ?? config.kernelName ?? "";
@@ -212,13 +214,9 @@ export class RemoteSession implements Session {
     // warnings) — emitted after it so the user still sees them.
     const resumeNotes: string[] = [];
 
-    // Best-effort read of the existing file (a hiccup must not lose the kernel).
-    let model: Record<string, unknown> | null = null;
-    try {
-      model = await this.server.readNotebook(path);
-    } catch (err) {
-      this.warnings.push(`could not read the existing notebook "${path}": ${(err as Error).message}`);
-    }
+    // Only a confirmed 404 is a new notebook. Never seed a writable session
+    // from an empty document when its remote contents could not be read.
+    const model = await this.server.readNotebook(path);
     const parsed = parseNotebook(model);
     this.adoptedMeta = parsed.meta;
     this.slots = parsed.slots;
@@ -606,13 +604,12 @@ export class RemoteSession implements Session {
       }
     }
     this.docEdited = true;
-    // Persist the edit now (bounded) so the tool can report a WRITTEN file, not
-    // just a pending one. A failed PUT only warns, exactly like a cell autosave.
-    await this.flushAutoSave(FLUSH_TIMEOUT_MS);
+    const remoteSave = await this.flushAutoSave();
     const cells = this.listCells();
     const index = affectedId ? cells.findIndex((c) => c.cellId === affectedId) : -1;
     return {
       action: opts.action,
+      remoteSave,
       ...(affectedId ? { cellId: affectedId } : {}),
       ...(index >= 0 ? { index } : {}),
       cells,
@@ -664,7 +661,7 @@ export class RemoteSession implements Session {
   async shutdown(): Promise<void> {
     // Flush the final snapshot before tearing down kernel/server (FR-9).
     // By-passed on failure and capped, so shutdown cannot hang (R9.2).
-    await this.flushAutoSave(SHUTDOWN_FLUSH_TIMEOUT_MS);
+    this.finalSave = await this.flushAutoSave(SHUTDOWN_FLUSH_TIMEOUT_MS);
     try {
       if (this.kernel && !this.kernel.isDisposed) await this.kernel.shutdown();
     } finally {
@@ -691,14 +688,13 @@ export class RemoteSession implements Session {
 
   async getRuntimeStatus(): Promise<RuntimeStatus | undefined> {
     if (!this.kernel) {
-      // Keep the observability side-channel after teardown: the shutdown tool
-      // reads `lastAutoSave` to report whether a final snapshot was written
-      // (issue 1-6).
+      // Preserve both the last completed upload and the bounded shutdown receipt.
       return {
         status: "stopped",
         lifecycle: "stopped",
         warnings: this.warnings,
         lastAutoSave: this.lastAutoSave,
+        finalSave: this.finalSave,
       };
     }
     return {
@@ -881,77 +877,62 @@ export class RemoteSession implements Session {
   }
 
   /**
-   * Mark the snapshot dirty and wake the serial worker (FR-5.3). Never
-   * awaits: auto-save must not add latency to `runCell` (R5.1). A complete
-   * no-op when `remoteAutoSave` is off (R7.1).
+   * Schedule a snapshot without adding upload latency to runCell.
+   * No-op when remote auto-save is disabled.
    */
   private scheduleAutoSave(): void {
     if (!this.config.remoteAutoSave || !this.effectivePath) return;
-    this.autoSaveDirty = true;
-    this.pumpAutoSave();
+    void this.queueSnapshot(this.effectivePath);
   }
 
-  private pumpAutoSave(): void {
-    if (this.autoSaveRunning) return; // the loop re-checks the dirty flag each round
-    this.autoSaveRunning = true;
-    this.autoSaveChain = this.autoSaveChain
-      .catch(() => undefined) // keep the chain alive after an unexpected throw
-      .then(() => this.autoSaveLoop());
-  }
-
-  /**
-   * Serial worker: at most one PUT in flight. Each round clears the dirty
-   * flag and THEN serializes, so any later PUT carries the same-or-newer
-   * cells — an older snapshot can never overwrite a newer one (FR-5.2).
-   * Consecutive triggers therefore coalesce into at most an in-flight plus a
-   * trailing PUT (FR-5.3).
-   */
-  private async autoSaveLoop(): Promise<void> {
-    try {
-      while (this.autoSaveDirty && this.effectivePath) {
-        this.autoSaveDirty = false;
-        const path = this.effectivePath;
-        const snapshot = this.toNotebookObject(); // fresh AFTER the flag, BEFORE the PUT
-        try {
-          await this.server.uploadNotebook(path, snapshot);
-          this.lastAutoSave = { path, at: new Date().toISOString(), ok: true };
-          this.onAutoSave?.({ ok: true, path });
-        } catch (err) {
-          const message = (err as Error).message;
-          this.lastAutoSave = { path, at: new Date().toISOString(), ok: false, error: message };
-          this.warnings.push(`remote autosave to "${path}" failed: ${message}`);
-          this.onAutoSave?.({ ok: false, path, error: message });
-        }
+  /** Coalesce pending edits, but never share the result of a PUT already in flight. */
+  private queueSnapshot(path: string): Promise<RemoteSaveResult> {
+    if (this.pendingSave) return this.pendingSave;
+    this.pendingSave = this.autoSaveChain.then(async (): Promise<RemoteSaveResult> => {
+      this.pendingSave = undefined;
+      let result: RemoteSaveResult;
+      let event: AutoSaveEvent;
+      try {
+        await this.server.uploadNotebook(path, this.toNotebookObject());
+        result = { status: "saved" };
+        event = { ok: true, path };
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        this.warnings.push(`remote autosave to "${path}" failed: ${error}`);
+        result = { status: "failed", error };
+        event = { ok: false, path, error };
       }
-    } finally {
-      this.autoSaveRunning = false;
-    }
+      this.lastAutoSave = { ...event, at: new Date().toISOString() };
+      try { this.onAutoSave?.(event); } catch { /* observers cannot change a save receipt */ }
+      return result;
+    });
+    this.autoSaveChain = this.pendingSave;
+    return this.pendingSave;
   }
 
   /**
-   * Force a final round and wait for the worker to drain (FR-9 / tests).
+   * Force a snapshot and await the round that includes this change.
    * No-op when `remoteAutoSave` is off — never sends a request (R7.1).
    * Times out instead of hanging forever (R9.2).
    */
-  async flushAutoSave(timeoutMs: number = FLUSH_TIMEOUT_MS): Promise<void> {
-    if (!this.config.remoteAutoSave) return;
-    if (this.executedCells > 0 || this.docEdited) {
-      this.autoSaveDirty = true;
-      this.pumpAutoSave();
-    }
+  async flushAutoSave(timeoutMs: number = FLUSH_TIMEOUT_MS): Promise<RemoteSaveResult> {
+    if (!this.config.remoteAutoSave) return { status: "disabled" };
+    if (!this.effectivePath || !(this.executedCells || this.docEdited)) return { status: "unchanged" };
+    const save = this.queueSnapshot(this.effectivePath);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await Promise.race([
-        this.autoSaveChain,
-        new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error("flush timed out")), timeoutMs);
+      const result = await Promise.race([
+        save,
+        new Promise<{ status: "timeout" }>((resolve) => {
+          timer = setTimeout(() => resolve({ status: "timeout" }), timeoutMs);
           timer.unref?.();
         }),
       ]);
-    } catch {
+      if (result.status !== "timeout") return result;
       this.warnings.push(
         "remote autosave flush timed out; the latest snapshot may not be persisted",
       );
+      return { status: "timeout" };
     } finally {
       if (timer) clearTimeout(timer);
     }

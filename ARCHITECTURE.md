@@ -27,9 +27,6 @@ v3 collapses the model to **one kind of session**:
 - Opening a notebook whose kernel was **previously closed** starts a NEW kernel
   bound to the same path and **re-runs the file's code cells from first to
   last**, so in-memory state is rebuilt automatically.
-- The agent flow is fixed and self-checkable: `jupyter_list_notebooks(dir=…)`
-  (is a session active in that folder?) → `jupyter_open_notebook` (+ `jupyter_list_kernels` when the
-  kernels are unknown) → `jupyter_repl`.
 
 v2's engineering decisions are carried over unchanged (hexagonal layout, the
 dual-channel execution protocol, the two JSON stores, the offline test suite).
@@ -91,34 +88,12 @@ Two things are easy to conflate, and v3 separates them sharply:
   the only thing `src/config.ts` requires (`JUPYTER_REMOTE_URL` /
   `JUPYTER_REMOTE_TOKEN`, env or `~/.pi-jupyter/config.json`).
 - **Which kernel executes the code** (python3, ir, …) is fixed **when a
-  notebook is opened** — it is *not* a per-call parameter anymore. Order:
-  1. a **live session** bound to the path reuses its running kernel (attach);
-  2. else the `kernel` parameter of `jupyter_open_notebook` (the agent's choice,
-     overriding a recorded kernelspec — a warning is shown when they differ);
-  3. else the kernelspec **recorded in the notebook file**;
-  4. else the optional `config.kernelName` fallback;
-  5. else `"python3"`.
+  notebook is opened**. Subsequent executions cannot silently switch kernels
+  and lose the state earlier cells established.
 
 `jupyter_repl`, `jupyter_add_dependencies` and `jupyter_save_notebook` run on
 the *notebook's* session and never take a `kernel`.
 
-Flow (see `extensions/repl.ts`):
-
-1. `jupyter_list_kernels` connects to the configured server, reads
-   `/api/kernelspecs` (`ServerPort.listKernelSpecs`) and shows the agent the
-   available kernels — each annotated with its recorded purpose (from
-   `~/.pi-jupyter/purposes.json`) plus the server default and any open
-   notebook session bound to it. Kernels without a recorded purpose are flagged
-   as new.
-2. **Only a newly discovered kernel with no recorded purpose** triggers a
-   question: the agent asks the user what it is for and stores the answer
-   with `jupyter_set_kernel_purpose` → `src/purposes.ts` writes
-   `~/.pi-jupyter/purposes.json` (`{ name: purpose }`, atomic replace).
-   Already-recorded kernels are shown with their purpose and reused — no
-   re-asking, in this session or later ones.
-3. When a notebook must be opened that has no live kernel and no recorded
-   kernelspec, the agent passes the matching kernelspec *name* as the `kernel`
-   parameter of `jupyter_open_notebook`.
 
 Consequences encoded in the code:
 
@@ -166,54 +141,19 @@ the user opens in JupyterLab. `RemoteSession` adopts a path via
    is then started **bound to the same path** (`sessionPath: path`), and — this
    is v3 — the document's code cells are executed **from the first to the
    last** (`replayFromStart` in `extensions/repl.ts`) so the in-memory state is
-   rebuilt. The kernel serving a resumed notebook comes from the file's
-   recorded kernelspec → the agent's `kernel` opt → `config.kernelName` →
-   `python3`.
+   rebuilt (unless replay was skipped).
 3. **No file → CREATE.** Same as (2) with an empty document (nothing to
    replay); the first auto-save materializes the file at the path.
 
-Because the replay happens inside `jupyter_open_notebook`, a session opened
-from a previously-closed notebook always returns with its state restored and a
-per-cell report of any failures. `jupyter_repl` that finds the notebook not yet
-open does the same replay before running the requested code — the invariant is
-"a fresh kernel bound to a file has its cells re-run", no matter which tool
-triggered the open. An *attach* never re-runs anything.
+Only a confirmed contents 404 denotes a new document. Other read failures abort
+before opening a kernel, so an incomplete snapshot cannot overwrite the file.
+The per-path initialization promise includes any required replay. Requests arriving
+during initialization share the first request's policy and cannot interleave user
+code with replay. The ready-session map is populated only after replay completes.
 
 `Session.contentsPath` and `Session.listCells()` (restored + run cells, in
 document order) let the tool layer tell the agent exactly what is there.
 
-### The agent flow (encoded in the tool prompts)
-
-1. `jupyter_list_notebooks(dir=…)` — see what exists in the given remote contents directory (open in this
-   conversation / LIVE kernel on the server / a file pi never opened) and what is resumable. `dir` is required;
-   the listing comes from the server's contents API merged with live sessions and the registry (ghosts dropped),
-   shows only DIRECT children unless `recursive=true`, and accepts `query` for a substring search. Pass `"."` for
-   the server root.
-2. No active session, or switching to another notebook → `jupyter_open_notebook`
-   (`path`, or `local_file` to import). `jupyter_list_kernels` first when the
-   kernels are unknown.
-3. If the open result says `started`, the previously-closed session was replayed
-   from first to last (state restored, failures listed); pass `replay=skip` to load
-   the document without executing anything (read-only inspection).
-4. Continuing an active session → `jupyter_repl(notebook=<same path>, code=…)`
-   reuses the session (or pass `cell_id=…` instead of `code` to re-run an existing
-   cell from its current, possibly just-edited source). Runs are scratch unless `persist=true`; `jupyter_outputs(path)` shows the outputs already
-   stored in the file. Restructure the document itself with `jupyter_edit_cell`
-   (delete/replace/move/insert a cell) — never by editing the `.ipynb` from outside.
-5. Need code another notebook already implements → `jupyter_read_cells(path=…)`
-   (optional `query` / `cell_id` / `include_markdown`) reads its SOURCES without
-   opening it: no kernel, no replay, nothing executed.
-
-The flow is deliberately **single-notebook**: `jupyter_open_notebook` is called
-once to start/continue a session, and every later step reuses it. It is NOT an
-open → run → shutdown → open loop — a shutdown kills the live kernel (and every
-variable/import it held) and the next open merely replays the file, the opposite
-of continuity. Because a scratch run (`persist=false`) is intentionally not
-written to the document, the way to record a cell is `persist=true`, not a
-restart. The tools' `promptGuidelines` also forbid the common workaround of
-writing a throwaway `.py`/`.R` source file and converting/importing it to
-`.ipynb`: the notebook is the record, so code goes straight through
-`jupyter_repl`.
 
 ### Re-running identical code happens IN PLACE
 
@@ -224,14 +164,13 @@ id, outputs replaced; a restored slot drops its verbatim `raw` so the fresh
 result serializes), and the match repeats on every identical re-run: re-running
 the same code never duplicates the cell, so the notebook keeps one copy per
 logical cell, like JupyterLab. Only code that matches no existing cell appends a
-new code slot. Replaying a file with a fresh kernel therefore does not
-duplicate the document — each logical cell executes once in place.
+new code slot. Replay instead passes the file cell ID, so even identical sources
+in different slots each receive their own execution result.
 
 ### Scratch runs, editable documents, and replay diagnostics (v3.2)
 
-Agent-experience fixes sit on top of the v3 model; all are pi-side and touch no data:
-- **`jupyter_repl` is scratch by default.** `RunCellOpts.persist` (default `true`
-  in the library, `false` from the tool) decides whether a run is written into the
+- **Kernel execution and document recording are independent.** `RunCellOpts.persist`
+  (library default `true`; tool default depends on `cell_id`) controls updates to the
   document: `persist: false` executes on the kernel and returns the result, but
   appends nothing, updates no existing cell, and schedules no auto-save — so a
   probe/experiment can never pollute the saved `.ipynb`. `persist: true` keeps the
@@ -245,6 +184,8 @@ Agent-experience fixes sit on top of the v3 model; all are pi-side and touch no 
   it with `jupyter_repl(notebook=…, cell_id=…)` to execute the edited source and
   fill them again in place. This is what removes the old external-script workflow
   whose write raced the auto-save.
+  The edit receipt uses the result of its bounded flush, not a previous
+  successful upload. A timeout leaves the session edit and the worker intact.
 - **`jupyter_repl` can re-run a cell by id.** `RunCellOpts.cellId` (tool param
   `cell_id`) targets an EXISTING code cell instead of matching by source, using the
   cell's current source when `code` is omitted. This is the edit-then-rerun path:
@@ -258,8 +199,8 @@ Agent-experience fixes sit on top of the v3 model; all are pi-side and touch no 
   The id is validated BEFORE the kernel runs, so a typo cannot execute and then lose
   the result.
 - **`jupyter_open_notebook(replay="skip")` (issue 1-3).** A fresh kernel normally
-  replays the file's cells to rebuild state; `skip` loads the document only and
-  executes nothing. The replay report additionally splits root causes into failures
+  replays the file's cells to rebuild state; `skip` still opens the kernel but
+  skips file-cell execution. The replay report splits root causes into failures
   the FILE already recorded as errors (`DocumentCell.fileError`) and failures this
   replay produced, so historical debt is not mistaken for a new bug.
 - **`jupyter_outputs(path)` is a read-only escape hatch.** It reads the `.ipynb`
@@ -366,7 +307,7 @@ returns the mode + the loaded code cells. `jupyter_repl`,
 | `jupyter_repl` params | `notebook?` + `kernel?` + `dependencies?` | `notebook` **required**; `code` or `cell_id`; no `kernel`, no `dependencies` |
 | `jupyter_add_dependencies` / `jupyter_save_notebook` | `notebook?` + `kernel?` | `notebook` **required**; no `kernel` |
 | Session kinds | notebook + anonymous-per-kernel | notebook only |
-| Kernel selection | agent's `kernel` param on every code call | fixed at open time (file kernelspec → `kernel` opt on open → config fallback → python3) |
+| Kernel selection | agent's `kernel` param on every code call | fixed at open time |
 | Open of a closed notebook | loads cells; agent re-runs setup cells | starts a new kernel and **re-runs all cells first → last** (state restored) |
 | Cleanup on conversation end | shutdown anon kernels + detach named | detach every notebook session (keep-kernels default) |
 | Dependency install | in `jupyter_repl` or `jupyter_add_dependencies` | `jupyter_add_dependencies(notebook=…)` only |

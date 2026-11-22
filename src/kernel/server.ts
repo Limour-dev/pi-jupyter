@@ -241,7 +241,9 @@ export class JupyterServer implements ServerPort {
       );
     }
     const body = (await res.json()) as { type?: string; content?: Record<string, unknown> } | null;
-    if (body?.type !== "notebook" || !body.content) return null;
+    if (body?.type !== "notebook" || !Array.isArray(body.content?.cells)) {
+      throw new Error(`[pi-jupyter] ${contentsPath} did not return a notebook with a cells array`);
+    }
     return body.content;
   }
 

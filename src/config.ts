@@ -166,21 +166,27 @@ export function isConfigured(env: Record<string, string | undefined> = process.e
   try {
     loadConfig(env);
     return true;
-  } catch {
+  } catch (err) {
+    if (err instanceof ConfigFileError) throw err;
     return false;
   }
 }
 
+class ConfigFileError extends Error {}
 /**
  * Read ~/.pi-jupyter/config.json once; an env-only setup gets {}.
  */
 function readConfigFile(): Record<string, unknown> {
+  const path = join(homedir(), ".pi-jupyter", "config.json");
   try {
-    return JSON.parse(
-      readFileSync(join(homedir(), ".pi-jupyter", "config.json"), "utf-8"),
-    ) as Record<string, unknown>;
-  } catch {
-    return {}; /* no config file — env vars only */
+    const parsed = JSON.parse(readFileSync(path, "utf-8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("expected a JSON object");
+    }
+    return parsed;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw new ConfigFileError(`[pi-jupyter] Invalid configuration at ${path}: ${(err as Error).message}`);
   }
 }
 

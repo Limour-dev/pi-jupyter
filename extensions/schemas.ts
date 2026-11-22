@@ -10,13 +10,12 @@ import { Type, type Static } from "typebox";
  * kernel runs the code (kernelspec *name* such as "python3" / "ir") is picked
  * when a notebook is opened/created. jupyter_repl and the other session tools
  * no longer take `kernel` — they run on the notebook's session, whose kernel
- * was fixed at open time (live kernel / file's recorded kernelspec / this
- * param / config fallback).
+ * was fixed at open time.
  */
 const KERNEL = Type.Optional(
   Type.String({
     description:
-      'Kernelspec *name* (e.g. "python3" or "ir", from jupyter_list_kernels) to serve this notebook when no live kernel is bound to it. Overrides the notebook file\'s recorded kernelspec (a warning is shown when they differ); omit for the file\'s kernelspec, then the config fallback.',
+      'Kernelspec name (e.g. "python3" or "ir", from jupyter_list_kernels) requested for a fresh kernel.',
   }),
 );
 
@@ -37,26 +36,24 @@ export const JUPYTER_PARAMS = Type.Object({
   code: Type.Optional(
     Type.String({
       description:
-        "Code to execute in the notebook's persistent kernel. Use print()/display() for side effects; the last expression's repr is the result. Omit it (and pass `cell_id`) to re-run an existing cell from its current source. SCRATCH by default: the output comes back but the document is untouched unless `persist=true`, in which case re-running an existing same-source cell updates it in place (same cell id, no duplicate) and new code appends a cell.",
+        "Source to execute. Omit when running the current source of cell_id. Use print()/display() for intermediate output; the last expression is returned.",
     }),
   ),
   cell_id: Type.Optional(
     Type.String({
       description:
-        'Re-run the EXISTING code cell with this id (from jupyter_open_notebook details.cells, jupyter_outputs, or a jupyter_edit_cell result) using its CURRENT source — pass `cell_id` instead of `code` after jupyter_edit_cell(action="replace") to fill the cell\'s outputs again without retyping the source. A `cell_id` run records in place by default (persist defaults to true); pass persist=false for a scratch probe. When both are given, `code` is executed into that cell. Unknown ids are rejected before anything runs.',
+        "Target an existing cell by id. If code is provided, execute it instead of the cell's current source.",
     }),
   ),
   timeout_secs: Type.Optional(
     Type.Number({
-      description: "Max seconds to wait for execution (default 120).",
-      default: 120,
+      description: "Execution timeout in seconds (minimum 1); omit to use the configured per-cell timeout.",
     }),
   ),
   persist: Type.Optional(
     Type.Boolean({
       description:
-        "Record this run in the notebook document? Default false = SCRATCH: the code runs on the kernel and its output is returned, but it is NOT added as a cell and does NOT modify an existing matching cell, so exploratory/probe code never pollutes the saved .ipynb. Pass true when the run is real work worth keeping: an existing same-source cell then re-runs in place, or a new cell is appended, and the remote auto-save picks it up. This is the ONLY way to make a run appear in the .ipynb — never shut the notebook down and re-open it to try to see a run.",
-      default: false,
+        "Record this run? Defaults to true with cell_id and false otherwise. Without an id, recording updates the first same-source code cell or inserts a new cell.",
     }),
   ),
   after_cell_id: Type.Optional(
@@ -101,7 +98,7 @@ export const OPEN_NOTEBOOK_PARAMS = Type.Object({
   replay: Type.Optional(
     Type.Union([Type.Literal("auto"), Type.Literal("skip")], {
       description:
-        'Whether to re-run the file\'s code cells when a fresh kernel is started: "auto" (default) replays them from first to last to rebuild the in-memory state; "skip" only LOADS the document (cell list + saved outputs) and executes nothing — use it when you just need to read the current file without paying for a full replay. A skipped replay leaves the new kernel with NO state, so later cells that depend on earlier ones must be re-run with jupyter_repl(notebook=…, persist=true). Only a "started" open (no live kernel) replays at all; an attach never replays.',
+        'On a fresh kernel, "auto" runs file cells in order and "skip" leaves them unexecuted. Both open an executable session. Attaching to a live kernel never replays.',
       default: "auto",
     }),
   ),
@@ -158,7 +155,7 @@ export const LIST_NOTEBOOKS_PARAMS = Type.Object({
   dir: Type.String({
     minLength: 1,
     description:
-      'Remote contents directory the listing is scoped to (required) — the same "/"-separated coordinate space the listed paths use, e.g. "notes". The listing is read from the server\'s contents API (so notebooks pi never opened are visible) and merged with live kernels and pi\'s registry; stale registry entries whose file no longer exists are dropped. By default only notebooks DIRECTLY in this directory are shown (no recursion — set recursive=true to include subdirectories). Pass "." for the server root.',
+      'Remote contents directory, e.g. "notes" or "." for the server root.',
   }),
   recursive: Type.Optional(
     Type.Boolean({

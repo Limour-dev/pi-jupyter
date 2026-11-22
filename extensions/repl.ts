@@ -9,92 +9,6 @@
  *   src/session.ts          RemoteSession (behind KernelPort)
  *   src/kernel/             @jupyterlab/services adapters
  *   src/domain/             pure logic
- * Notebook-first execution — how a NEW agent session should drive this
- * extension:
- *
- *   STAY IN ONE NOTEBOOK — drive it like a human at a REPL. Pick one notebook,
- *   open it ONCE, then keep calling `jupyter_repl(notebook=<same path>, …)` for
- *   every step; the kernel's variables/imports persist across those calls.
- *   Do NOT loop open → run → shutdown → open, and do NOT open a second path
- *   (or a fresh notebook) to "see" what a run produced: a closed kernel loses
- *   all live state and re-opening only replays the file. A SCRATCH run
- *   (persist=false, the default) is intentionally absent from the .ipynb, so
- *   the way to KEEP a cell is `persist=true` — not a restart. Likewise never
- *   write throwaway `.py`/`.R` (or other) source files and convert/import them
- *   as `.ipynb` just to execute; put the code straight into `jupyter_repl` on
- *   the notebook you already have open (or `jupyter_open_notebook` a real
- *   notebook first). Use `jupyter_outputs(path)` to re-read saved outputs, and
- *   `jupyter_read_cells(path)` to READ another notebook's code without opening
- *   it (read-only: no kernel, no replay, nothing executed).
- *
- *   - `jupyter_list_notebooks(dir=…)` first: it shows the notebooks that EXIST
- *     on the server in ONE remote contents directory (required `dir`; read from
- *     the contents API, so files pi never opened are visible) merged with LIVE
- *     /api/sessions rows and the ~/.pi-jupyter/notebooks.json registry — a
- *     registry entry whose file is gone is dropped as stale. Only direct
- *     children are listed unless `recursive=true` (add `query` to search by
- *     path). Pass "." for the server root.
- *   - No active session yet, or switching to another notebook → CONTINUE one
- *     with `jupyter_open_notebook` (a `path` from jupyter_list_notebooks, or a
- *     `local_file` to import). When the agent does not know which kernels the
- *     server offers, call `jupyter_list_kernels` first. Only then run code with
- *     `jupyter_repl`.
- *   - Restructure an open notebook's cells with `jupyter_edit_cell`
- *     (delete/replace/move/insert) — do NOT edit the `.ipynb` from an external
- *     script; pass `replay=skip` to `jupyter_open_notebook` to load a file without
- *     re-running it (issues 1-2 / 1-3).
- *   - Opening a notebook whose kernel was previously closed (no live kernel)
- *     starts a NEW kernel bound to the same path and re-runs the file's code
- *     cells FROM FIRST TO LAST, so the in-memory state is rebuilt before any
- *     jupyter_repl call. A LIVE kernel is ATTACHED instead (no new kernel, no
- *     re-run — variables/imports survive). With an active session, each
- *     jupyter_repl(notebook=…) REUSES that session. Runs are SCRATCH by
- *     default (`persist=false`): the output is returned but the document is not
- *     modified. Pass `persist=true` to record a cell; use jupyter_outputs(path)
- *     to read outputs already saved in a file, and jupyter_read_cells(path) to
- *     borrow code from a notebook that is not open (no kernel, no replay).
- *   - There are NO anonymous per-kernel sessions anymore: jupyter_repl /
- *     jupyter_add_dependencies / jupyter_save_notebook all require a
- *     `notebook` path. Which kernel serves a notebook is fixed when it is
- *     opened — the live kernel, else the file's recorded kernelspec, else the
- *     agent's `kernel` param on jupyter_open_notebook, else the config
- *     fallback. The kernel is never chosen on a jupyter_repl call.
- *   - What each kernel is FOR is remembered across sessions in
- *     ~/.pi-jupyter/purposes.json (`jupyter_set_kernel_purpose`). Only a
- *     newly discovered kernel with no recorded purpose triggers a question to
- *     the user; recorded kernels are shown with their purpose and reused.
-
- * Config (env vars):
- *   JUPYTER_REMOTE_URL    e.g. http://192.168.105.1:57002   (user-set)
- *   JUPYTER_REMOTE_TOKEN  e.g. 123456                       (user-set)
- *   JUPYTER_KERNEL_NAME   OPTIONAL fallback default kernel (a kernelspec
- *                         *name*, e.g. "ir" — not the display name "R");
- *                         used only when a notebook records no kernel and
- *                         jupyter_open_notebook gets none either
- *   JUPYTER_WORKING_DIR   base dir for relative save_notebook paths
- *   JUPYTER_TIMEOUT_RESTART_KERNEL=1  auto-restart a kernel still busy after
- *                                     a timeout (state lost)
- *   JUPYTER_BIND_SESSION=0  disable binding the kernel to an /api/sessions
- *                           row (default on: kernel shows in Running UI)
- *   JUPYTER_KEEP_KERNELS=0  shut kernels down when the conversation/process
- *                           ends (legacy). Default on: kernels stay running on
- *                           the server so a new conversation can re-attach to
- *                           the same notebook path and keep its variables
- *   JUPYTER_REMOTE_AUTOSAVE=0  disable the automatic snapshot upload to the
- *                              remote server after each cell (default on;
- *                              the file lands in the remote $HOME so the same
- *                              kernel can be re-opened in a browser)
- *   JUPYTER_REMOTE_SAVE_PATH   legacy override only for sessions created
- *                              WITHOUT an explicit path (every session today
- *                              opens a named notebook, so it is rarely used)
- *   JUPYTER_ENABLE_ADD_DEPENDENCIES=1  load the jupyter_add_dependencies tool
- *                              (or config.json "enableAddDependencies": true).
- *                              OPT-IN, default OFF.
- *   JUPYTER_ENABLE_SAVE_NOTEBOOK=0     hide the jupyter_save_notebook tool
- *                              (or config.json "enableSaveNotebook": false).
- *                              Default ON (issue 1-5). When a gate is off the
- *                              tool is not registered at all.
- * After editing, run `/reload` in pi.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { highlightCode } from "@earendil-works/pi-coding-agent";
@@ -103,6 +17,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
 import { CONFIG_HINT, isConfigured, loadConfig, loadToolGates } from "../src/config";
+import type { RemoteSaveResult } from "../src/domain/types";
 import type { CellResult, ContentsEntry, ResumeOutcome, Session } from "../src/domain/types";
 import { mergeNotebookRows } from "../src/domain/listing";
 import { parseNotebook } from "../src/domain/notebook";
@@ -229,6 +144,15 @@ type ReplayCellReport = {
   preExisting?: boolean;
 };
 
+function saveMessage(result: RemoteSaveResult): string {
+  switch (result.status) {
+    case "saved": return "Remote snapshot saved.";
+    case "disabled": return "Remote auto-save is disabled.";
+    case "timeout": return "Remote save timed out; completion is unconfirmed.";
+    case "failed": return `Remote save failed: ${result.error}`;
+    case "unchanged": return "No remote snapshot written.";
+  }
+}
 
 // ── extension ───────────────────────────────────────────────────────────────
 
@@ -258,7 +182,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       name: "jupyter_list_notebooks",
       label: "List Notebooks",
       description:
-        'List the notebooks in ONE remote contents directory (`dir`, required — direct children only, never recursing into subdirectories; pass "." for the server root) available to continue on the remote Jupyter Server. Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN (env) or ~/.pi-jupyter/config.json.',
+        "List notebooks in a remote contents directory. Not configured: set JUPYTER_REMOTE_URL and JUPYTER_REMOTE_TOKEN.",
       parameters: LIST_NOTEBOOKS_PARAMS,
       async execute() {
         throw new Error(CONFIG_HINT);
@@ -381,7 +305,13 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
   // jupyter_save_notebook all require `notebook`, so no code ever runs on a
   // kernel that is not bound to a notebook path.
   const sessionsByPath = new Map<string, Session>();
-  const openings = new Map<string, Promise<Session>>();
+  type OpenResult = {
+    session: Session;
+    outcome?: ResumeOutcome;
+    replayMode?: "auto" | "skip";
+    replay?: Awaited<ReturnType<typeof replayFromStart>>;
+  };
+  const openings = new Map<string, Promise<OpenResult>>();
   /** Per-kernel display counter for the In[n] / Out[n] call rendering. */
   const execCounts = new Map<string, number | null>();
 
@@ -415,8 +345,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
    * Re-run every code cell of an open notebook document, IN ORDER (first →
    * last), to rebuild the kernel's in-memory state after a fresh start (the
    * "previously closed session" case — new kernel bound to the file).
-   * runCell matches same-source cells IN PLACE, so each cell keeps its id and
-   * document position — nothing is duplicated. A failing cell does not stop the
+   * The file cell id, not its source, identifies the output slot. A failing cell does not stop the
    * replay: the rest still run, and the caller sees exactly which cells failed.
    */
   async function replayFromStart(sess: Session): Promise<{
@@ -434,7 +363,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     // stands on its own.
     let runRoot: number | null = null;
     for (let i = 0; i < cells.length; i++) {
-      const res = await sess.runCell(cells[i].source);
+      const res = await sess.runCell(cells[i].source, { cellId: cells[i].cellId });
       lastCount = res.executionCount ?? lastCount;
       const err = res.outputs?.find((o) => o.outputType === "error");
       const report: ReplayCellReport = {
@@ -486,8 +415,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
    *     attaching to a LIVE kernel when one is running there, otherwise
    *     starting a new kernel bound to the SAME path (seeded from the file).
    *
-   * Returns `{ session, opened, outcome }`: `outcome` carries the resume
-   * details (mode attached/started, prior code cells) only on the first open.
+   * Publish the session only after initialization, including any replay.
    */
   async function ensureNotebookSession(opts: {
     path: string;
@@ -495,44 +423,56 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     cwd?: string;
     source?: "remote" | "local";
     localFile?: string;
-  }): Promise<{ session: Session; opened: boolean; outcome: ResumeOutcome | undefined }> {
-    const path = normalizeContentsPath(opts.path); // "/a.ipynb" and "a.ipynb" are the SAME file
+    replayMode: "auto" | "skip";
+    importModel?: Record<string, unknown>;
+  }): Promise<OpenResult> {
+    const path = normalizeContentsPath(opts.path);
     const existing = sessionsByPath.get(path);
-    if (existing) {
-      return { session: existing, opened: false, outcome: undefined };
+    const pending = openings.get(path);
+    if (opts.importModel && (existing || pending)) {
+      throw new Error(`[pi-jupyter] cannot import over an open or opening notebook: ${path}`);
     }
-    let opening = openings.get(`path:${path}`);
-    if (!opening) {
-      opening = (async () => {
-        const server = new JupyterServer(config);
-        try {
-          const sess = new RemoteSession(server, config, {
-            // Pass the agent's explicit kernel ONLY — resume() derives the rest
-            // from the live session or the file's recorded kernelspec.
-            kernelName: opts.kernel?.trim() || undefined,
-            contentsPath: path,
-            runtime: "jupyter",
-            workingDir: opts.cwd ?? config.workingDir,
-            peerLabel: "pi",
-            description: `pi remote Jupyter notebook ${path}`,
-          });
-          await sess.resume(path);
-          sessionsByPath.set(path, sess);
-          execCounts.set(sess.kernelName, execCounts.get(sess.kernelName) ?? null);
-          return sess;
-        } catch (err) {
-          try { server.dispose(); } catch { /* ignore */ }
-          throw err;
+    if (existing) return { session: existing };
+    if (pending) return pending;
+
+    const opening = (async (): Promise<OpenResult> => {
+      const server = new JupyterServer(config);
+      const session = new RemoteSession(server, config, {
+        kernelName: opts.kernel?.trim() || undefined,
+        contentsPath: path, runtime: "jupyter", workingDir: opts.cwd ?? config.workingDir,
+        peerLabel: "pi", description: `pi remote Jupyter notebook ${path}`,
+      });
+      try {
+        if (opts.importModel) {
+          if (await server.findLiveSession(path)) {
+            throw new Error(`[pi-jupyter] cannot import over a LIVE kernel bound to ${path}`);
+          }
+          await server.uploadNotebook(path, opts.importModel);
         }
-      })();
-      openings.set(`path:${path}`, opening);
-    }
+        const outcome = await session.resume(path);
+        const replay = opts.replayMode === "auto" && outcome.mode === "started" && outcome.fileExisted
+          ? await replayFromStart(session) : undefined;
+        sessionsByPath.set(path, session);
+        execCounts.set(session.kernelName, execCounts.get(session.kernelName) ?? null);
+        rememberNotebook(session, opts.source ?? "remote", opts.localFile);
+        return { session, outcome, replayMode: opts.replayMode, replay };
+      } catch (err) {
+        // A failed replay must not leave a partially initialized fresh kernel
+        // available for a retry to attach to as if restoration had succeeded.
+        if (session.resumeOutcome?.mode === "started") {
+          await session.shutdown().catch(() => undefined);
+        } else {
+          await session.close();
+          server.dispose();
+        }
+        throw err;
+      }
+    })();
+    openings.set(path, opening);
     try {
-      const session = await opening;
-      rememberNotebook(session, opts.source ?? "remote", opts.localFile);
-      return { session, opened: true, outcome: session.resumeOutcome };
+      return await opening;
     } finally {
-      openings.delete(`path:${path}`);
+      openings.delete(path);
     }
   }
 
@@ -546,7 +486,6 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       const noPurpose: string[] = [];
       const lines: string[] = [
         "Available kernels on the configured Jupyter Server:",
-        "  Pass one of these names as `kernel` to jupyter_open_notebook when the notebook has no live kernel and its file records none.",
         "",
       ];
       for (const s of specs) {
@@ -639,11 +578,8 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     const scopeText = recursive
       ? `"${dir}" and its subdirectories`
       : `"${dir}" (direct children only)`;
-    const extraTools =
-      `jupyter_repl / jupyter_edit_cell${config.enableAddDependencies ? " / jupyter_add_dependencies" : ""}${config.enableSaveNotebook ? " / jupyter_save_notebook" : ""}`;
     const lines: string[] = [
       `Notebooks on the configured Jupyter Server in ${scopeText}${query ? ` matching "${query}"` : ""}:`,
-      `  Read from the server's contents API (so files pi never opened are visible) and merged with live /api/sessions rows. Continue one with jupyter_open_notebook(path=…); then keep passing the same path as \`notebook\` to ${extraTools}.`,
       "",
     ];
     if (listError) {
@@ -671,7 +607,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       for (const info of rows) {
         const marks: string[] = [];
         if (info.live) marks.push("LIVE — open attaches, variables kept");
-        else marks.push("file only — open starts a fresh kernel that re-runs its cells (state restored)");
+        else if (serverListed) marks.push("no live kernel listed");
         if (info.open) marks.push("open in this conversation");
         if (info.source === "local" && info.localFile) marks.push(`imported from ${info.localFile}`);
         const purpose = purposes[info.kernel];
@@ -707,7 +643,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_list_notebooks",
     label: "List Notebooks",
     description:
-      'List the notebooks that exist on the remote Jupyter Server in the given remote contents `dir` (required; pass "." for the server root). The listing comes from the server\'s contents API — so notebooks pi has never opened are included — merged with live kernels and pi\'s registry; stale registry entries whose file is gone are dropped. By default only direct children of `dir` are shown; set recursive=true (optionally with query="…") to search subdirectories in one call. Each row says whether it has a LIVE kernel (jupyter_open_notebook attaches, variables kept) or is file-only (it starts a fresh kernel that re-runs the cells to restore state).',
+      "Find remote notebook paths and see which have live kernels. Lists direct children by default; enable recursive search for subdirectories.",
     parameters: LIST_NOTEBOOKS_PARAMS,
     async execute(_toolCallId, params: ListNotebooksParams) {
       const dir = params.dir.trim();
@@ -769,13 +705,10 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_open_notebook",
     label: "Open / Continue Notebook",
     description:
-      "Open/continue a notebook session on the remote Jupyter Server. A LIVE kernel bound to the path is ATTACHED (no new kernel — variables kept); otherwise a NEW kernel is started on the same path and the file's code cells are re-run from first to last, restoring the state (a path with no file starts empty); pass replay=skip to only LOAD the document and execute nothing. Give `path` (a remote contents path, as listed by jupyter_list_notebooks) or `local_file` (import a local .ipynb). Pass `kernel` (a kernelspec name) when there is no live kernel and the file records none — otherwise the file's kernelspec, then the config fallback, apply. Open a notebook ONCE and stay in it: calling this again for a path already open in this conversation is a no-op. Never shut a notebook down just to re-open it or to make it 'pick up' your runs — a shutdown + open discards the live kernel state, and a scratch run is recorded only with jupyter_repl(persist=true).",
+      "Establish an executable notebook session, or import a local notebook. Kernel selection: attachable live kernel → explicit kernel → file kernelspec → configured fallback → python3.",
     parameters: OPEN_NOTEBOOK_PARAMS,
     promptGuidelines: [
-      "Open a given notebook at most ONCE per conversation, then drive it entirely with jupyter_repl(notebook=<same path>, …). Do NOT shut a notebook down and re-open it to \"refresh\" it, to get a clean state, or to see your runs — a shutdown + open discards the live kernel state; pass persist=true to jupyter_repl to record a cell.",
-      "Do NOT run code by writing a scratch .py/.R (or other) source file and converting/importing it as .ipynb. Check what exists with jupyter_list_notebooks, pick the one notebook that fits the task, and stay in it for the whole task.",
-      'Pass replay="skip" to jupyter_open_notebook when you only need to READ the current file (cell list and saved outputs): it loads the document and executes nothing, so a heavy notebook is not re-run just to be inspected. A skipped replay leaves the new kernel with no state — rebuild only what you need with jupyter_repl(notebook=…, persist=true).',
-      "To READ code that lives in another notebook, do not open it at all — jupyter_read_cells(path=…) returns its cell sources read-only (optional query/cell_id, include_markdown for notes), with no kernel and no replay. Opening is only for RUNNING code in that notebook.",
+      "Inspect saved sources with jupyter_read_cells and saved outputs with jupyter_outputs, without opening a kernel. Use jupyter_list_notebooks if the path is unknown.",
     ],
     async execute(_toolCallId, params: OpenNotebookParams, _signal, _onUpdate, ctx) {
       const localRaw = params.local_file?.trim();
@@ -789,6 +722,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       let openPath = remoteRaw;
       let source: "remote" | "local" = "remote";
       let localFile: string | undefined;
+      let importModel: Record<string, unknown> | undefined;
       const base = ctx?.cwd ?? process.cwd();
       if (localRaw) {
         localFile = resolvePath(localRaw, base);
@@ -803,53 +737,33 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
         }
         openPath = basename(localFile);
         source = "local";
-        const probe = new JupyterServer(config);
-        try {
-          const live = await probe.findLiveSession(openPath);
-          if (live) {
-            throw new Error(
-              `[pi-jupyter] a LIVE kernel is already bound to ${openPath} on the server. Importing ${localFile} over it would attach to a different notebook — open the live path directly, or shut it down first (jupyter_shutdown_notebook).`,
-            );
-          }
-          await probe.uploadNotebook(openPath, model); // import: remote copy == the local file
-        } finally {
-          try { probe.dispose(); } catch { /* ignore */ }
-        }
+        importModel = model;
       }
       if (!openPath) throw new Error("[pi-jupyter] empty notebook path.");
-      const { session, opened, outcome } = await ensureNotebookSession({
+      const { session, outcome, replay, replayMode } = await ensureNotebookSession({
+        replayMode: params.replay ?? "auto", importModel,
         path: openPath,
         kernel: params.kernel,
         cwd: base,
         source,
         localFile,
       });
-      // A "started" open means the notebook's previous session was closed and a
-      // NEW kernel was just bound to its file — replay the file's code cells
-      // FROM FIRST TO LAST so the in-memory state is rebuilt here, before any
-      // jupyter_repl call. An attach (live kernel) already has its state.
-      // issue 1-3: replay="skip" loads the document only — the agent can inspect
-      // a heavy notebook without paying for a full re-run.
-      const replayMode = params.replay ?? "auto";
-      const wouldReplay = opened && outcome?.mode === "started" && outcome.fileExisted;
-      const replay =
-        wouldReplay && replayMode !== "skip" ? await replayFromStart(session) : undefined;
       const cells = session.listCells();
       const lines: string[] = [];
-      const modeText = opened && outcome ? outcome.mode : "open";
+      if (replayMode && replayMode !== (params.replay ?? "auto")) {
+        lines.push(`Concurrent open: the first request selected replay="${replayMode}".`);
+      }
+      const modeText = outcome?.mode ?? "open";
       if (modeText === "attached") {
         lines.push(`Attached to the LIVE kernel (${session.kernelName}) serving ${openPath} — variables and imports from the earlier session are intact.`);
         if (cells.length) lines.push(`${cells.length} code cell(s) loaded from the file for reference.`);
-        lines.push("Keep working: no setup needs re-running.");
       } else if (modeText === "started") {
-        lines.push(`Started a NEW ${session.kernelName} kernel bound to ${openPath} (a fresh kernel — in-memory variables were NOT preserved). Stay in this notebook: keep calling jupyter_repl(notebook="${openPath}", …); pass persist=true to record a cell (a scratch run is intentionally not saved). Do not shut it down and re-open to "see" a run.`);
+        lines.push(`Started a new ${session.kernelName} kernel bound to ${openPath}.`);
         if (outcome?.fileExisted) {
           if (cells.length === 0) {
             lines.push("The file existed but holds no code cells — the document starts clean.");
           } else if (replayMode === "skip") {
-            lines.push(
-              `Replay SKIPPED (replay="skip"): the ${cells.length} file cell(s) were LOADED but NOT executed. The new kernel has NO in-memory state — re-run the cells you need with jupyter_repl(notebook="${openPath}", persist=true) before relying on their variables, and read the saved outputs with jupyter_outputs("${openPath}").`,
-            );
+            lines.push(`Replay skipped: loaded ${cells.length} file cell(s) without executing them.`);
           } else if (replay) {
             if (replay.failed.length === 0) {
               lines.push(`State restored: re-ran all ${replay.replayed} code cell(s) from first to last — every one succeeded.`);
@@ -866,20 +780,14 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
             }
           }
         } else {
-          lines.push("No file existed at that path yet — the notebook starts empty and will be auto-saved there.");
+          lines.push("No file existed at that path; the session document starts empty.");
         }
       } else {
-        lines.push(`Notebook ${openPath} is already open in this conversation (kernel ${session.kernelName}). Keep working in it with jupyter_repl(notebook="${openPath}", …) — do NOT shut it down and re-open to refresh it.`);
+        lines.push(`Reused the open notebook ${openPath} (kernel ${session.kernelName}).`);
       }
       lines.push("");
       if (cells.length) {
-        const cellsNote =
-          replayMode === "skip" && wouldReplay
-            ? "loaded from the file, NOT executed because replay=skip"
-            : "all executed above unless noted";
-        lines.push(
-          `Code cells (${cellsNote} — jupyter_repl(notebook="${openPath}", code=<source>) runs more):`,
-        );
+        lines.push(`Code cells (${replay ? "replayed" : "current document"}):`);
         cells.forEach((c, i) => {
           const one = c.source.replace(/\s+/g, " ").trim().slice(0, 140);
           lines.push(`  [${i}] (exec ${c.executionCount ?? "-"}${c.restored ? ", restored" : ", ran"}) ${one}`);
@@ -892,7 +800,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
         if (withOutput.length) {
           lines.push("");
           lines.push(
-            "Replayed outputs (tail of each cell's stdout/text — the file has the rest):",
+            "Replayed outputs (tail of each cell's stdout/text):",
           );
           for (const c of withOutput) {
             lines.push(`  [${c.index}] (${c.status})`);
@@ -915,9 +823,6 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
         for (const f of oldDebt) {
           lines.push(`  · [${f.index}] ${f.cellId} — ${f.status}: ${f.error}`);
         }
-        lines.push(
-          '  Fix or delete them with jupyter_edit_cell, then re-run their replacements with jupyter_repl(notebook=…, cell_id=…, persist=true); do NOT shut down and re-open to "refresh".',
-        );
       }
       if (newRoots.length) {
         lines.push("");
@@ -934,7 +839,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
         lines.push(
           `  ~ ${cascades.length} more cell(s) failed immediately after a failure and are reported as DOWNSTREAM CASCADES of their run's first failure (` +
             cascades.map((f) => `[${f.index}]←[${f.upstream}]`).join(", ") +
-            ") — fix the root cell(s) with jupyter_edit_cell, then re-run them with jupyter_repl(notebook=…, cell_id=…, persist=true); do NOT shut down and re-open.",
+            ").",
         );
       }
       return {
@@ -944,6 +849,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
           kernel: session.kernelName,
           notebook_id: session.notebookId,
           mode: modeText,
+          ...(replayMode ? { replay_mode: replayMode } : {}),
           cell_count: cells.length,
           cells,
           ...(replay ? { replay: { replayed: replay.replayed, failed: replay.failed, cells: replay.cells } } : {}),
@@ -1031,7 +937,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_read_cells",
     label: "Read Notebook Cell Code",
     description:
-      "Read the CODE already written in a notebook FILE — READ-ONLY: no kernel is started, no session is opened and nothing is executed, so a notebook that is NOT open in this conversation is safe to inspect. Use it to BORROW an existing implementation (a helper, a data-cleaning pipeline, a plotting/model recipe) instead of opening that notebook: opening starts or attaches a kernel and, with no live kernel, REPLAYS the whole file, which is far more than reading the code. `query` searches the cell sources (case-insensitive literal substring — `def fit`, `df[\"x\"]` need no escaping — or /regex/), `cell_id` reads one cell, include_markdown=true adds the surrounding notes/headings; results are capped (max_cells / max_lines) and the header says how much was omitted, so page with offset or raise max_cells. Saved OUTPUTS are not returned — use jupyter_outputs(path) for those.",
+      "Read or search saved notebook cell sources without starting a kernel. Use this to inspect code or borrow an implementation.",
     parameters: READ_CELLS_PARAMS,
     async execute(_toolCallId, params: ReadCellsParams) {
       const path = normalizeContentsPath(params.path);
@@ -1130,7 +1036,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_shutdown_notebook",
     label: "Shut Down Notebook Kernel",
     description:
-      "Shut down one notebook's kernel on the server — its .ipynb file stays, and a later jupyter_open_notebook resumes it with a fresh kernel. `path` may be a notebook open in this conversation or any LIVE kernel bound to that path on the server (left by an earlier conversation or a browser tab). Use /jupyter-reset to shut down everything. This is NOT a way to refresh a notebook or to make your runs appear: it destroys the live kernel's variables/imports. Keep the notebook open for the whole task and record cells with jupyter_repl(persist=true); shut down only when you are really done with it.",
+      "Stop the kernel bound to a notebook path. Its in-memory variables are lost; the notebook file is kept.",
     parameters: SHUTDOWN_NOTEBOOK_PARAMS,
     async execute(_toolCallId, params: ShutdownNotebookParams) {
       const path = normalizeContentsPath(params.path);
@@ -1141,6 +1047,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
         execCounts.delete(sess.kernelName);
       };
       // (1) Open in THIS conversation — a notebook session at the path.
+      await openings.get(path);
       const local = sessionsByPath.get(path);
       if (local) {
         const kernel = local.kernelName;
@@ -1151,11 +1058,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
         // the agent can tell "the remote file is current" from "nothing was
         // recorded / auto-save is off".
         const last = status?.lastAutoSave;
-        const snapshot = last
-          ? last.ok
-            ? `Final snapshot written to the remote ${last.path} at ${last.at}.`
-            : `Final snapshot upload FAILED (${last.error ?? "unknown error"}) — the remote file may be behind.`
-          : "No snapshot was written (nothing was recorded or edited this session, or remote auto-save is off).";
+        const snapshot = status?.finalSave ? saveMessage(status.finalSave) : "Final save unconfirmed.";
         return {
           content: [
             {
@@ -1163,7 +1066,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
               text: `Kernel serving ${path} shut down (file kept; a future open resumes it with a fresh kernel). ${snapshot}`,
             },
           ],
-          details: { path, kernel, target: "this-conversation", lastAutoSave: last ?? null },
+          details: { path, kernel, target: "this-conversation", remote_save: status?.finalSave, lastAutoSave: last ?? null },
         };
       }
       // (2) A LIVE kernel bound to `path` that this conversation never opened
@@ -1193,20 +1096,10 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_repl",
     label: "Jupyter REPL",
     description:
-      "Execute code in a notebook's persistent kernel on the remote Jupyter Server. `notebook` (required) is the remote contents path of the notebook to run in — pass the path you opened with jupyter_open_notebook to REUSE that session (a not-yet-open notebook is opened the same way first). Variables/imports persist across calls in that notebook's kernel. SCRATCH by default (`persist=false`): the code runs on the kernel and its output is returned, but the notebook document is NOT changed — exploratory/probe code never pollutes the saved .ipynb. Pass `persist=true` for real work that should be kept (an existing same-source cell is re-run in place, otherwise a new cell is appended, and the remote auto-save picks it up). Pass `cell_id` (instead of `code`) to RE-RUN an existing cell from its CURRENT source — the way to refill a cell's outputs after jupyter_edit_cell changed it, with no need to retype the code; a `cell_id` run records in place by default. The last expression is the result; use print()/display() for intermediate output; images are returned inline. Stay in the SAME notebook for the whole task: pass the same `notebook` path again and again — do NOT shut it down and re-open it to refresh it, and do NOT route code through a scratch .py/.R file; `persist=true` is how a run becomes part of the .ipynb. Use jupyter_edit_cell to restructure the document itself (delete/replace/move/insert a cell); never edit the .ipynb through an external script. Output is capped to the FIRST 50 + LAST 100 lines; when a run prints more, the omitted middle lines are written to a /tmp/pi-jupyter/*.log file whose path is returned (details.output_truncated.log_path) so you can read them on demand instead of flooding the context.",
-    promptSnippet:
-      "jupyter_repl: run code on a remote Jupyter notebook kernel — pass the notebook path opened with jupyter_open_notebook.",
+      "Execute code in a notebook's persistent kernel and return its output. Opens the path automatically if needed. Large text outputs are capped; details.output_truncated gives the log path.",
+    promptSnippet: "jupyter_repl: execute code in a notebook session.",
     promptGuidelines: [
-      "Begin Jupyter work with jupyter_list_notebooks(dir=…) to see which sessions are active in the current remote contents folder (open here / LIVE on the server) — scope the listing to one directory (direct children only, no recursion); with none active — or to switch — continue a notebook with jupyter_open_notebook first (call jupyter_list_kernels first when you do not know the kernels), then run code with jupyter_repl.",
-      `Pass the same \`notebook\` path to jupyter_repl${config.enableAddDependencies ? " / jupyter_add_dependencies" : ""}${config.enableSaveNotebook ? " / jupyter_save_notebook" : ""} to REUSE the session. Opening a previously-closed notebook starts a new kernel bound to its file and re-runs the code cells from first to last (state restored); opening a LIVE one attaches with variables kept.`,
-      `jupyter_repl has no \`kernel\` or \`dependencies\` parameter — the kernel was fixed when the notebook was opened (live kernel / recorded kernelspec / the \`kernel\` param of jupyter_open_notebook / config fallback).${config.enableAddDependencies ? " Install packages with jupyter_add_dependencies." : ""}`,
-      "The last expression is the result; use print()/display() for intermediate output. Images (matplotlib, PIL) come back inline.",
-      "jupyter_repl takes `code` (new code) or `cell_id` (re-run an existing cell from its current, possibly just-edited source) — at least one is required. A `cell_id` run targets that document cell and records in place by default (persist=false opts out to a scratch probe); `code` together with `cell_id` executes the new code into that cell.",
-      "jupyter_repl is SCRATCH by default (persist=false): the run's output comes back but it is not written to the notebook. Use it freely for probes/experiments. Pass persist=true only for real work you want recorded; use jupyter_outputs(path) to re-read outputs already saved in a .ipynb without running anything.",
-      "Need code that another notebook already implements (a helper, a pipeline, a plotting/model recipe)? Use jupyter_read_cells(path=…, query=… or cell_id=…) — read-only: no kernel, no replay, nothing executed — and do NOT jupyter_open_notebook that notebook just to look at its code.",
-      "Drive ONE notebook like a REPL for the whole task: pass the same `notebook` path to every call. Do NOT loop jupyter_shutdown_notebook → jupyter_open_notebook to refresh state, and do NOT open a second/new notebook just to see whether a run was recorded — a shutdown wipes the live kernel's variables, while persist=true is what puts a run into the file.",
-      "Never execute by writing a throwaway .py/.R/.jl (or other) source file and converting or importing it as .ipynb, and never fall back to a plain file/shell script to avoid the notebook. Put the code directly into jupyter_repl against the notebook path from jupyter_open_notebook; use jupyter_list_notebooks first if you have not picked that notebook yet.",
-      'To CHANGE an existing cell, do not just re-run the new code (that appends a duplicate): replace it with jupyter_edit_cell(action="replace", cell_id=…, source=…) and then re-run THAT cell with jupyter_repl(notebook=…, cell_id=…, persist=true) — it uses the edited source, so the code need not be retyped. Delete probe/error cells with jupyter_edit_cell(action="delete", cell_id=…). Never edit the .ipynb through an external script.',
+      "Execute directly with jupyter_repl on the same notebook path. Do not shut down and reopen to refresh it or route code through temporary scripts.",
     ],
     parameters: JUPYTER_PARAMS,
 
@@ -1296,8 +1189,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       const notebookRaw = params.notebook?.trim();
       if (!notebookRaw) {
         throw new Error(
-          "[pi-jupyter] jupyter_repl requires a `notebook` path — start/continue a session" +
-            " with jupyter_open_notebook first, then pass the same path here.",
+          "[pi-jupyter] jupyter_repl requires a notebook contents path.",
         );
       }
       // `code` or `cell_id` — at least one. With `cell_id` alone the source
@@ -1308,18 +1200,9 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
             " existing cell (its current source is used, so a just-edited cell needs no retyping).",
         );
       }
-      const { session: sess, opened, outcome } = await ensureNotebookSession({
-        path: notebookRaw,
-        cwd: ctx.cwd,
+      const { session: sess, replay, replayMode } = await ensureNotebookSession({
+        path: notebookRaw, cwd: ctx.cwd, replayMode: "auto",
       });
-      // Opening a previously-closed notebook (a fresh kernel bound to its file)
-      // replays the file's cells FIRST → LAST so the in-memory state is rebuilt
-      // here too — exactly what jupyter_open_notebook does. An attach (live
-      // kernel) or an already-open session keeps its state as-is.
-      const replay =
-        opened && outcome?.mode === "started" && outcome.fileExisted && sess.listCells().length > 0
-          ? await replayFromStart(sess)
-          : undefined;
       // Side-channel for the remote auto-save (FR-6.2): failures are notified
       // to the user but never touch this tool's result (by-pass, FR-6.1).
       sess.onAutoSave = (e) => {
@@ -1345,11 +1228,8 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
         code = target.source;
       }
       const persist = params.persist ?? Boolean(cellIdRaw);
-      const timeoutSecs = Math.max(1, params.timeout_secs ?? 120);
       const result = await sess.runCell(code, {
-        timeoutMs: Math.round(timeoutSecs * 1000),
-        // Scratch by default: the agent must opt in with persist=true to write
-        // the run into the notebook document (append or in-place re-run).
+        timeoutMs: params.timeout_secs === undefined ? undefined : Math.round(Math.max(1, params.timeout_secs) * 1000),
         persist,
         cellId: cellIdRaw,
         afterCellId: params.after_cell_id,
@@ -1389,6 +1269,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
           execution_count: result.executionCount,
           is_error: isError,
           persist,
+          ...(replayMode ? { replay_mode: replayMode } : {}),
           ...(capped.dropped
             ? {
                 output_truncated: {
@@ -1410,14 +1291,13 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     name: "jupyter_edit_cell",
     label: "Edit Notebook Cell",
     description:
-      "Edit an OPEN notebook's document in place: delete, replace, move or insert a code cell. This is the in-plugin write path for restructuring a notebook — deleting probe/error cells, replacing a cell with a self-contained version, reordering cells, inserting a promoted scratch cell — so the .ipynb itself is edited from inside the session. Cell ids come from jupyter_open_notebook (details.cells) or jupyter_outputs(path). Replacing a cell CLEARS its old outputs; re-run it with jupyter_repl(notebook=…, cell_id=…) to fill them again (the cell is matched by id, using its edited source). Every edit is written to the remote .ipynb (unless remote auto-save is off).",
+      "Restructure code cells in the session document without executing the edited cell. Reports remote save status separately.",
     parameters: EDIT_CELL_PARAMS,
     promptGuidelines: [
-      "Restructure an open notebook with jupyter_edit_cell — delete probe/error cells, replace a cell's source, move cells into order, insert a cell. Do NOT write an external .py script or JSON patch to modify the .ipynb: the live document is the source of truth, and an outside write can be overwritten by the session's auto-save.",
-      'After jupyter_edit_cell(action="replace", …) the cell has NO outputs; re-run it with jupyter_repl(notebook=…, cell_id=…) to execute its edited source and record the result in place (persist then defaults to true, so no code needs retyping). To promote a scratch run, re-run it with persist=true plus after_cell_id.',
+      "Code alone defaults to scratch; cell_id defaults to recording in place; explicit persist wins. Change document structure with jupyter_edit_cell, not an external .ipynb write.",
     ],
     async execute(_toolCallId, params: EditCellParams) {
-      const { session: sess } = await ensureNotebookSession({ path: params.notebook });
+      const { session: sess } = await ensureNotebookSession({ path: params.notebook, replayMode: "skip" });
       const outcome = await sess.editCell({
         action: params.action,
         cellId: params.cell_id,
@@ -1448,7 +1328,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
             type: "text",
             text:
               `${verb} cell${outcome.cellId ? ` ${outcome.cellId}` : ""} in ${sess.contentsPath}${positionNote};` +
-              ` the document was written to the remote .ipynb.\nCode cells now:\n${cellList}`,
+              ` session document updated. ${saveMessage(outcome.remoteSave)}\nCode cells now:\n${cellList}`,
           },
         ],
         details: {
@@ -1456,6 +1336,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
           notebook: sess.contentsPath,
           notebook_id: sess.notebookId,
           action: outcome.action,
+          remote_save: outcome.remoteSave,
           cell_id: outcome.cellId ?? null,
           index: outcome.index ?? null,
           cells: outcome.cells,
@@ -1479,7 +1360,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
         if (!params.packages.length) {
           return { content: [{ type: "text", text: "No packages given." }], details: {} };
         }
-        const { session: sess } = await ensureNotebookSession({ path: params.notebook });
+        const { session: sess } = await ensureNotebookSession({ path: params.notebook, replayMode: "skip" });
         try {
           await addDepsAndSync(sess, params.packages);
         } catch (err) {
@@ -1519,7 +1400,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
       parameters: SAVE_NOTEBOOK_PARAMS,
       async execute(_toolCallId, params: SaveNotebookParams, signal, _onUpdate, ctx) {
         if (signal?.aborted) throw new Error("aborted");
-        const { session: sess } = await ensureNotebookSession({ path: params.notebook });
+        const { session: sess } = await ensureNotebookSession({ path: params.notebook, replayMode: "skip" });
         // Resolve relative paths against the pi working directory (ctx.cwd), NOT
         // the pi *process* cwd — under npx those are different places (BUG-3).
         const base = ctx?.cwd ?? process.cwd();
@@ -1541,6 +1422,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
     description:
       "Start fresh: shut down ALL open notebook sessions on the server. The saved .ipynb files stay; the next jupyter_open_notebook call starts new kernels bound to them and re-runs their cells (clean slate: no prior variables or imports).",
     handler: async (_args, ctx) => {
+      await Promise.allSettled(openings.values());
       const olds = [...sessionsByPath.values()];
       sessionsByPath.clear();
       openings.clear();
@@ -1556,6 +1438,7 @@ export default function piJupyterExtension(pi: ExtensionAPI) {
   // ── cleanup on shutdown ─────────────────────────────────────────────────
 
   pi.on("session_shutdown", async () => {
+    await Promise.allSettled(openings.values());
     const notebookSessions = [...sessionsByPath.values()];
     sessionsByPath.clear();
     openings.clear();

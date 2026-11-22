@@ -95,6 +95,56 @@ describe("RemoteSession", () => {
     server = makeServerPort(kernel);
   });
 
+  it("aborts on a read failure without attaching, starting or writing back", async () => {
+    server.readNotebook.mockRejectedValue(new Error("HTTP 503"));
+    const s = new RemoteSession(server, CONFIG);
+    await expect(s.resume("existing.ipynb")).rejects.toThrow("503");
+    await s.shutdown();
+    expect(server.connectToSession).not.toHaveBeenCalled();
+    expect(server.startKernel).not.toHaveBeenCalled();
+    expect(server.uploadNotebook).not.toHaveBeenCalled();
+  });
+
+  it("reports each edit's save result, not a previous success", async () => {
+    const s = new RemoteSession(server, CONFIG);
+    await s.resume("edits.ipynb");
+    const edit = (source: string) => s.editCell({ action: "insert", source });
+    expect((await edit("a")).remoteSave.status).toBe("saved");
+    server.uploadNotebook.mockRejectedValueOnce(new Error("disk full"));
+    expect((await edit("b")).remoteSave).toEqual({ status: "failed", error: "disk full" });
+    vi.useFakeTimers();
+    try {
+      let finish!: () => void;
+      server.uploadNotebook.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; }));
+      const pending = edit("c");
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect((await pending).remoteSave.status).toBe("timeout");
+      expect(s.listCells().map(c => c.source)).toEqual(["a", "b", "c"]);
+      finish();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("attributes overlapping edits to their own snapshot uploads", async () => {
+    const s = new RemoteSession(server, CONFIG);
+    await s.resume("edits.ipynb");
+    let uploaded!: () => void;
+    server.uploadNotebook.mockImplementationOnce(() => new Promise<void>(r => { uploaded = r; }))
+      .mockRejectedValueOnce(new Error("second upload failed"));
+    const first = s.editCell({ action: "insert", source: "first" });
+    await vi.waitFor(() => expect(server.uploadNotebook).toHaveBeenCalledTimes(1));
+    const second = s.editCell({ action: "insert", source: "second" });
+    uploaded();
+    expect((await first).remoteSave.status).toBe("saved");
+    expect((await second).remoteSave.status).toBe("failed");
+  });
+  it("keeps edits in the session when remote auto-save is disabled", async () => {
+    const s = new RemoteSession(server, { ...CONFIG, remoteAutoSave: false });
+    await s.resume("edits.ipynb");
+    const edit = await s.editCell({ action: "insert", source: "x" });
+    expect(edit.remoteSave.status).toBe("disabled");
+    expect(edit.cells[0].source).toBe("x");
+    expect(server.uploadNotebook).not.toHaveBeenCalled();
+  });
   it("initialize: pings, starts kernel, waits connected, bootstraps", async () => {
     const s = new RemoteSession(server, CONFIG);
     await s.initialize();

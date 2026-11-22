@@ -144,6 +144,8 @@ export type RuntimeStatus = {
   warnings?: string[];
   /** Outcome of the most recent remote auto-save (FR-6.4), if any. */
   lastAutoSave?: AutoSaveInfo;
+  /** Result of the bounded flush during shutdown, not an earlier autosave. */
+  finalSave?: RemoteSaveResult;
 };
 
 /** Emitted to `Session.onAutoSave` after each remote auto-save attempt. */
@@ -254,8 +256,12 @@ export type CellEditOpts = {
   afterCellId?: string;
 };
 
+export type RemoteSaveResult =
+  | { status: "saved" | "disabled" | "timeout" | "unchanged" }
+  | { status: "failed"; error: string };
 export type CellEditOutcome = {
   action: CellEditAction;
+  remoteSave: RemoteSaveResult;
   /** Id of the affected cell (kept for replace/move; fresh for insert). */
   cellId?: string;
   /** 0-based index of the affected cell among code cells AFTER the edit. */

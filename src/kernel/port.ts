@@ -114,8 +114,8 @@ export interface ServerPort {
   connectToSession(model: ServerSessionModel): Promise<KernelPort>;
   /**
    * Read an nbformat model from a remote contents path
-   * (GET /api/contents/<path>). Resolves null when the file is missing or is
-   * not a notebook.
+   * (GET /api/contents/<path>). Only a confirmed 404 resolves null; other
+   * errors and non-notebook responses reject.
    */
   readNotebook(contentsPath: string): Promise<Record<string, unknown> | null>;
   /**

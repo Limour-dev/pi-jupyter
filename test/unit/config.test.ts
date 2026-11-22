@@ -3,7 +3,7 @@
  * Env vars are injected so no real environment is touched.
  */
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isConfigured, loadConfig, loadToolGates } from "../../src/config";
@@ -28,6 +28,25 @@ const BASE = {
 };
 
 describe("loadConfig", () => {
+  it("parses the example config and each README JSON example", () => {
+    const example = readFileSync(new URL("../../config.example.json", import.meta.url), "utf8");
+    expect(JSON.parse(example)).toHaveProperty("url");
+    const readme = readFileSync(new URL("../../README.md", import.meta.url), "utf8");
+    const blocks = [...readme.matchAll(/^```json\n([\s\S]*?)^```/gm)];
+    expect(blocks.length).toBeGreaterThan(0);
+    for (const [, json] of blocks) expect(JSON.parse(json)).toHaveProperty("url");
+  });
+
+  it("rejects malformed config even with credentials in the environment", () => {
+    const dir = join(homedir(), ".pi-jupyter");
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, "config.json");
+    writeFileSync(path, "{ bad");
+    try {
+      expect(() => loadConfig(BASE)).toThrow(/Invalid configuration.*config\.json/);
+      expect(() => isConfigured(BASE)).toThrow(/Invalid configuration/);
+    } finally { rmSync(path); }
+  });
   it("reads url + token from env", () => {
     const cfg = loadConfig(BASE);
     expect(cfg.url).toBe("http://example:8888");
